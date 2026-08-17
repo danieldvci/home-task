@@ -1,0 +1,69 @@
+{
+  "entities": {
+    "Household": {
+      "title": "Household",
+      "description": "A group of users sharing chores",
+      "type": "object",
+      "properties": {
+        "ownerId": { "type": "string", "maxLength": 128 },
+        "members": { "type": "array", "maxLength": 20 }
+      },
+      "required": ["ownerId", "members"]
+    },
+    "User": {
+      "title": "User",
+      "description": "A local household user profile",
+      "type": "object",
+      "properties": {
+        "name": { "type": "string", "maxLength": 100 },
+        "color": { "type": "string", "maxLength": 20 },
+        "isAbsent": { "type": "boolean" }
+      },
+      "required": ["name", "color", "isAbsent"]
+    },
+    "Chore": {
+      "title": "Chore",
+      "description": "A chore to be completed",
+      "type": "object",
+      "properties": {
+        "name": { "type": "string", "maxLength": 100 },
+        "frequency": { "type": "string", "enum": ["daily", "weekly", "custom_days"] },
+        "customDays": { "type": "array", "maxLength": 7 },
+        "rotation": { "type": "array", "maxLength": 20 },
+        "currentIndex": { "type": "number" },
+        "lastCompletedAt": { "type": "string", "maxLength": 30 }
+      },
+      "required": ["name", "frequency", "rotation", "currentIndex"]
+    },
+    "Log": {
+      "title": "Log",
+      "description": "Activity log entry",
+      "type": "object",
+      "properties": {
+        "userId": { "type": "string", "maxLength": 128 },
+        "action": { "type": "string", "maxLength": 100 },
+        "details": { "type": "string", "maxLength": 200 },
+        "timestamp": { "type": "string", "maxLength": 30 }
+      },
+      "required": ["userId", "action", "details", "timestamp"]
+    }
+  },
+  "firestore": {
+    "/households/{householdId}": {
+      "schema": { "$ref": "#/entities/Household" },
+      "description": "Stores household metadata and members."
+    },
+    "/households/{householdId}/users/{userId}": {
+      "schema": { "$ref": "#/entities/User" },
+      "description": "Users inside a household."
+    },
+    "/households/{householdId}/chores/{choreId}": {
+      "schema": { "$ref": "#/entities/Chore" },
+      "description": "Chores inside a household."
+    },
+    "/households/{householdId}/logs/{logId}": {
+      "schema": { "$ref": "#/entities/Log" },
+      "description": "Activity logs inside a household."
+    }
+  }
+}

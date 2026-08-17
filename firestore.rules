@@ -1,0 +1,165 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+    
+    // Global safety net
+    match /{document=**} {
+      allow read, write: if false;
+    }
+
+    // Helpers
+    function isSignedIn() { return request.auth != null; }
+    function incoming() { return request.resource.data; }
+    function existing() { return resource.data; }
+    function isValidId(id) { return id is string && id.size() <= 128 && id.matches('^[a-zA-Z0-9_\\-]+$'); }
+    
+    // Validation: Household
+    function isValidHousehold(data) {
+      return data.keys().hasAll(['ownerId', 'members']) 
+        && data.keys().size() == 2
+        && data.ownerId is string && data.ownerId.size() <= 128
+        && data.members is list && data.members.size() > 0 && data.members.size() <= 20
+        && data.members[0] is string;
+    }
+
+    // Validation: User (Local Profile)
+    function isValidUser(data) {
+      return data.keys().hasAll(['name', 'color', 'isAbsent'])
+        && data.keys().size() == 3
+        && data.name is string && data.name.size() <= 100
+        && data.color is string && data.color.size() <= 30
+        && data.isAbsent is bool;
+    }
+
+    // Validation: Chore
+    function isValidChore(data) {
+      return data.keys().hasAny(['name', 'frequency', 'rotation', 'currentIndex']) // required keys
+        && data.name is string && data.name.size() <= 100
+        && data.frequency is string && data.frequency in ['daily', 'weekly', 'custom_days']
+        && data.rotation is list && data.rotation.size() <= 20
+        && data.currentIndex is number;
+        // customDays and lastCompletedAt are optional, so we handle them loosely or we can be strict
+    }
+
+    function isValidChoreStrict(data) {
+      let hasCustom = data.keys().hasAny(['customDays']);
+      let hasLastComp = data.keys().hasAny(['lastCompletedAt']);
+      let baseSize = 4;
+      let totalSize = baseSize + (hasCustom ? 1 : 0) + (hasLastComp ? 1 : 0);
+      
+      return data.keys().hasAll(['name', 'frequency', 'rotation', 'currentIndex'])
+        && data.keys().size() == totalSize
+        && data.name is string && data.name.size() <= 100
+        && data.frequency is string && data.frequency in ['daily', 'weekly', 'custom_days']
+        && data.rotation is list && data.rotation.size() <= 20
+        && data.currentIndex is number
+        && (!hasCustom || (data.customDays is list && data.customDays.size() <= 7))
+        && (!hasLastComp || (data.lastCompletedAt == null || (data.lastCompletedAt is string && data.lastCompletedAt.size() <= 30)));
+    }
+
+    function isValidLog(data) {
+      return data.keys().hasAll(['userId', 'action', 'details', 'timestamp'])
+        && data.keys().size() == 4
+        && data.userId is string && data.userId.size() <= 128
+        && data.action is string && data.action.size() <= 100
+        && data.details is string && data.details.size() <= 200
+        && data.timestamp is string && data.timestamp.size() <= 30;
+    }
+
+    // Household Rules
+    match /households/{householdId} {
+      allow get: if isSignedIn() && isValidId(householdId); // Anyone signed in can read if they have the exact ID (used for joining)
+      allow list: if isSignedIn() && request.auth.uid in resource.data.members;
+      
+      allow create: if isSignedIn() 
+        && isValidId(householdId)
+        && isValidHousehold(incoming())
+        && incoming().ownerId == request.auth.uid
+        && request.auth.uid in incoming().members;
+        
+      allow update: if isSignedIn() 
+        && isValidId(householdId)
+        && (
+          request.auth.uid in existing().members // Existing member
+          || 
+          (
+            // New user joining
+            incoming().members.hasAll(existing().members) &&
+            incoming().members.size() == existing().members.size() + 1 &&
+            request.auth.uid in incoming().members
+          )
+        )
+        && incoming().ownerId == existing().ownerId // owner is immortal
+        && incoming().diff(existing()).affectedKeys().hasOnly(['members'])
+        && incoming().members is list && incoming().members.size() > 0 && incoming().members.size() <= 20
+        && incoming().members[0] is string;
+        
+      allow delete: if isSignedIn() && isValidId(householdId) && request.auth.uid == existing().ownerId;
+      
+      // Subcollection: users
+      match /users/{userId} {
+        allow get: if isSignedIn() 
+          && isValidId(householdId) 
+          && isValidId(userId)
+          && request.auth.uid in get(/databases/$(database)/documents/households/$(householdId)).data.members;
+          
+        allow list: if isSignedIn() 
+          && isValidId(householdId) 
+          && request.auth.uid in get(/databases/$(database)/documents/households/$(householdId)).data.members;
+          
+        allow create: if isSignedIn() 
+          && isValidId(householdId) 
+          && isValidId(userId)
+          && request.auth.uid in get(/databases/$(database)/documents/households/$(householdId)).data.members
+          && isValidUser(incoming());
+          
+        allow update: if isSignedIn() 
+          && isValidId(householdId) 
+          && isValidId(userId)
+          && request.auth.uid in get(/databases/$(database)/documents/households/$(householdId)).data.members
+          && isValidUser(incoming());
+          
+        allow delete: if isSignedIn() 
+          && isValidId(householdId) 
+          && isValidId(userId)
+          && request.auth.uid in get(/databases/$(database)/documents/households/$(householdId)).data.members;
+      }
+      
+      // Subcollection: chores
+      match /chores/{choreId} {
+        allow get: if isSignedIn() 
+          && isValidId(householdId) 
+          && isValidId(choreId)
+          && request.auth.uid in get(/databases/$(database)/documents/households/$(householdId)).data.members;
+          
+        allow list: if isSignedIn() 
+          && isValidId(householdId) 
+          && request.auth.uid in get(/databases/$(database)/documents/households/$(householdId)).data.members;
+          
+        allow create: if isSignedIn() 
+          && isValidId(householdId) 
+          && isValidId(choreId)
+          && request.auth.uid in get(/databases/$(database)/documents/households/$(householdId)).data.members
+          && isValidChoreStrict(incoming());
+          
+        allow update: if isSignedIn() 
+          && isValidId(householdId) 
+          && isValidId(choreId)
+          && request.auth.uid in get(/databases/$(database)/documents/households/$(householdId)).data.members
+          && isValidChoreStrict(incoming());
+          
+        allow delete: if isSignedIn() 
+          && isValidId(householdId) 
+          && isValidId(choreId)
+          && request.auth.uid in get(/databases/$(database)/documents/households/$(householdId)).data.members;
+      }
+      match /logs/{logId} {
+        allow get: if isSignedIn() && isValidId(householdId) && isValidId(logId) && request.auth.uid in get(/databases/$(database)/documents/households/$(householdId)).data.members;
+        allow list: if isSignedIn() && isValidId(householdId) && request.auth.uid in get(/databases/$(database)/documents/households/$(householdId)).data.members;
+        allow create: if isSignedIn() && isValidId(householdId) && isValidId(logId) && request.auth.uid in get(/databases/$(database)/documents/households/$(householdId)).data.members && isValidLog(incoming());
+        allow update: if false;
+        allow delete: if false;
+      }
+    }
+  }
+}

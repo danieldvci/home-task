@@ -1,0 +1,6 @@
+{
+  "name": "תורנויות הבית",
+  "description": "אפליקציה פשוטה לניהול משימות הבית. חלוקת מטלות יומית ושבועית בלי ריבים.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
