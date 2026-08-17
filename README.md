@@ -14,15 +14,21 @@ Built with **Next.js**, **Firebase**, and **Tailwind CSS**.
 npm install
 ```
 
-2. Copy env example and fill in secrets:
+2. Firebase is configured for project **`daniel-home-chore`** (`firebase-applet-config.json`).
+
+   In [Firebase Console](https://console.firebase.google.com/project/daniel-home-chore):
+   - Enable **Authentication → Google**
+   - Create **Firestore** (default database)
+   - Deploy rules: `npx firebase deploy --only firestore:rules`
+   - Ensure `localhost` is under Auth → Authorized domains
+
+3. Optional: copy env for Gemini (only if you add AI features):
 
 ```bash
 cp .env.example .env.local
 ```
 
-Set `GEMINI_API_KEY` (and `APP_URL` if needed). Review `firebase-applet-config.json` for your Firebase project.
-
-3. Start the app:
+4. Start the app:
 
 ```bash
 npm run dev
