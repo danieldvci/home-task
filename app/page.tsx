@@ -1044,6 +1044,35 @@ export default function ChoresApp() {
                   צור
                 </button>
               </div>
+
+              <p className="text-xs font-bold text-[#8C7E6A] mt-2">הצטרף לבית קיים</p>
+              <div className="flex gap-2">
+                <input
+                  type="text"
+                  value={joinCode}
+                  onChange={(e) => setJoinCode(e.target.value)}
+                  placeholder="קוד בית"
+                  className="flex-1 bg-[#FAF9F6] border border-[#E6E0D4] rounded-xl px-3 py-2 text-sm text-[#3D3732] font-mono outline-none focus:border-[#A1C181]"
+                />
+                <button
+                  disabled={homeActionBusy || !joinCode.trim()}
+                  onClick={async () => {
+                    setHomeActionBusy(true);
+                    try {
+                      await joinHousehold(joinCode.trim());
+                      setJoinCode('');
+                      setActiveTab('tasks');
+                    } catch {
+                      alert('קוד שגוי או תקלה בחיבור');
+                    } finally {
+                      setHomeActionBusy(false);
+                    }
+                  }}
+                  className="px-3 py-2 bg-[#3D5A80] text-white text-sm font-bold rounded-xl disabled:opacity-40"
+                >
+                  הצטרף
+                </button>
+              </div>
             </div>
           )}
           
