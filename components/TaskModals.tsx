@@ -1,21 +1,25 @@
 'use client';
 
 import React, { useEffect, useRef, useState } from 'react';
-import { Camera, CheckCircle2, X, ImagePlus, Repeat } from 'lucide-react';
+import { Camera, CheckCircle2, X, ImagePlus, Repeat, Loader2 } from 'lucide-react';
 import { motion } from 'motion/react';
 import { Avatar } from './Avatar';
+import { compressImage } from '../lib/image';
+import { validateProofFile } from '../lib/storage-upload';
 
 type Props = {
   choreName: string;
   busy?: boolean;
-  onConfirm: (file: File | null) => void;
+  onConfirm: (photo: Blob | null) => void;
   onCancel: () => void;
 };
 
 export function DoneConfirmModal({ choreName, busy, onConfirm, onCancel }: Props) {
   const inputRef = useRef<HTMLInputElement>(null);
   const [preview, setPreview] = useState<string | null>(null);
-  const [file, setFile] = useState<File | null>(null);
+  const [photo, setPhoto] = useState<Blob | null>(null);
+  const [processing, setProcessing] = useState(false);
+  const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
     return () => {
@@ -24,15 +28,31 @@ export function DoneConfirmModal({ choreName, busy, onConfirm, onCancel }: Props
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  const onPick = (f: File | null) => {
+  const onPick = async (f: File | null) => {
     if (preview) URL.revokeObjectURL(preview);
+    setError(null);
+    setPhoto(null);
     if (!f) {
-      setFile(null);
       setPreview(null);
       return;
     }
-    setFile(f);
+    const validationError = validateProofFile(f);
+    if (validationError) {
+      setPreview(null);
+      setError(validationError);
+      return;
+    }
     setPreview(URL.createObjectURL(f));
+    setProcessing(true);
+    try {
+      const compressed = await compressImage(f);
+      setPhoto(compressed);
+    } catch (err) {
+      console.error(err);
+      setError('עיבוד התמונה נכשל. אפשר לאשר בלי תמונה.');
+    } finally {
+      setProcessing(false);
+    }
   };
 
   return (
@@ -63,15 +83,24 @@ export function DoneConfirmModal({ choreName, busy, onConfirm, onCancel }: Props
           ref={inputRef}
           type="file"
           accept="image/*"
-          capture="environment"
           className="hidden"
-          onChange={(e) => onPick(e.target.files?.[0] || null)}
+          onChange={(e) => {
+            const f = e.target.files?.[0] || null;
+            e.target.value = '';
+            onPick(f);
+          }}
         />
 
         {preview ? (
           <div className="relative rounded-2xl overflow-hidden border border-[#E6E0D4] bg-[#FAF9F6]">
             {/* eslint-disable-next-line @next/next/no-img-element */}
             <img src={preview} alt="תצוגה מקדימה" className="w-full max-h-56 object-cover" />
+            {processing && (
+              <div className="absolute inset-0 flex items-center justify-center gap-2 bg-black/40 text-white text-sm font-medium">
+                <Loader2 className="w-4 h-4 animate-spin" />
+                מעבד תמונה...
+              </div>
+            )}
             <button
               type="button"
               onClick={() => onPick(null)}
@@ -91,17 +120,19 @@ export function DoneConfirmModal({ choreName, busy, onConfirm, onCancel }: Props
           </button>
         )}
 
+        {error && <p className="text-sm text-rose-500">{error}</p>}
+
         <div className="flex flex-col gap-2">
           <button
             type="button"
-            disabled={busy}
-            onClick={() => onConfirm(file)}
+            disabled={busy || processing}
+            onClick={() => onConfirm(photo)}
             className="w-full flex items-center justify-center gap-2 py-3.5 bg-[#A1C181] text-white rounded-2xl font-bold shadow-sm hover:bg-[#8eab72] disabled:opacity-60"
           >
             <CheckCircle2 className="w-5 h-5" />
-            {busy ? 'שומר...' : file ? 'אשר עם תמונה' : 'אשר ביצוע'}
+            {busy ? 'שומר...' : processing ? 'מעבד תמונה...' : photo ? 'אשר עם תמונה' : 'אשר ביצוע'}
           </button>
-          {file && (
+          {preview && (
             <button
               type="button"
               disabled={busy}
@@ -112,7 +143,7 @@ export function DoneConfirmModal({ choreName, busy, onConfirm, onCancel }: Props
               בלי תמונה
             </button>
           )}
-          {!file && (
+          {!preview && (
             <button
               type="button"
               disabled={busy}

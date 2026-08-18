@@ -30,7 +30,7 @@ import {
 import { motion, AnimatePresence } from 'motion/react';
 import { useAuth, useHousehold } from '../lib/hooks';
 import { db } from '../lib/firebase';
-import { collection, doc, onSnapshot, setDoc, deleteDoc, updateDoc, query, orderBy, limit } from 'firebase/firestore';
+import { collection, doc, onSnapshot, setDoc, deleteDoc, updateDoc, query, orderBy, limit, writeBatch } from 'firebase/firestore';
 import { uploadTaskProof, uploadUserAvatar, validateAvatarFile } from '../lib/storage-upload';
 import { Avatar } from '../components/Avatar';
 import { DoneConfirmModal, SkipConfirmModal, SwapTurnModal } from '../components/TaskModals';
@@ -494,39 +494,41 @@ export default function ChoresApp() {
     return logId;
   };
 
-  const completeDone = async (choreId: string, photoFile: File | null) => {
+  const completeDone = async (choreId: string, photoBlob: Blob | null) => {
     if (!householdId) return;
     const chore = chores.find(c => c.id === choreId);
     if (!chore) return;
     setActionBusy(true);
     try {
       const logId = `l${crypto.randomUUID().split('-')[0]}`;
-      let photoUrl: string | undefined;
-      if (photoFile) {
-        try {
-          photoUrl = await uploadTaskProof(householdId, logId, photoFile);
-        } catch (err) {
-          console.error(err);
-          alert('העלאת התמונה נכשלה. אפשר לנסות שוב או לאשר בלי תמונה.');
-          setActionBusy(false);
-          return;
-        }
-      }
       const activeIdx = getActiveAssigneeIndex(chore, users, chore.currentIndex);
       const nextIdx = getNextActiveIndex(chore, users, activeIdx);
-      await updateDoc(doc(db, 'households', householdId, 'chores', choreId), {
+      const logRef = doc(db, 'households', householdId, 'logs', logId);
+
+      const batch = writeBatch(db);
+      batch.update(doc(db, 'households', householdId, 'chores', choreId), {
         lastCompletedAt: selectedDate.toISOString(),
         currentIndex: nextIdx
       });
-      const payload: Record<string, string> = {
+      batch.set(logRef, {
         userId: currentUserId!,
         action: 'ביצוע משימה',
         details: `סיים/ה את משימת "${chore.name}"`,
         timestamp: new Date().toISOString()
-      };
-      if (photoUrl) payload.photoUrl = photoUrl;
-      await setDoc(doc(db, 'households', householdId, 'logs', logId), payload);
+      });
+      await batch.commit();
       setPendingDoneChoreId(null);
+
+      // Upload the proof photo in the background so completion feels instant,
+      // then patch the log with the resulting URL.
+      if (photoBlob) {
+        uploadTaskProof(householdId, logId, photoBlob)
+          .then((photoUrl) => updateDoc(logRef, { photoUrl }))
+          .catch((err) => {
+            console.error(err);
+            showToast('המשימה נשמרה, אך העלאת התמונה נכשלה');
+          });
+      }
     } catch (err) {
       console.error(err);
       showToast('שמירת הביצוע נכשלה');
