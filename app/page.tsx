@@ -4,9 +4,7 @@ import React, { useState, useEffect } from 'react';
 import { 
   CheckCircle2, 
   FastForward, 
-  User, 
   Settings, 
-  Calendar, 
   ListTodo, 
   UserX, 
   UserCheck,
@@ -14,24 +12,33 @@ import {
   Plus,
   Trash2,
   Pencil,
-  LogIn,
   LogOut,
-  Share2,
   Copy,
   ChevronUp,
   ChevronDown,
   X,
   History,
-  Bell,
-  Activity
+  Activity,
+  Shield
 } from 'lucide-react';
 import { motion, AnimatePresence } from 'motion/react';
 import { useAuth, useHousehold } from '../lib/hooks';
 import { db } from '../lib/firebase';
 import { collection, doc, onSnapshot, setDoc, deleteDoc, updateDoc, query, orderBy, limit } from 'firebase/firestore';
+import { uploadTaskProof } from '../lib/storage-upload';
+import { Avatar } from '../components/Avatar';
+import { DoneConfirmModal, SkipConfirmModal } from '../components/TaskModals';
+import { householdDisplayName, profileStorageKey } from '../lib/household-utils';
 
 // --- Types ---
-type UserType = { id: string; name: string; color: string; isAbsent: boolean };
+type UserType = {
+  id: string;
+  name: string;
+  color: string;
+  isAbsent: boolean;
+  linkedAuth?: boolean;
+  photoURL?: string;
+};
 type Chore = { 
   id: string; 
   name: string; 
@@ -47,6 +54,7 @@ type LogType = {
   action: string;
   details: string;
   timestamp: string;
+  photoUrl?: string;
 };
 
 // --- Helper Functions ---
@@ -139,16 +147,31 @@ const isDoneOnDay = (chore: Chore, targetDayStr: string) => {
 // --- Main App Component ---
 export default function ChoresApp() {
   const { user, loading: authLoading, login, logout } = useAuth();
-  const { householdId, household, loading: houseLoading, createHousehold, joinHousehold } = useHousehold(user?.uid);
+  const {
+    households,
+    householdId,
+    household,
+    loading: houseLoading,
+    selectHousehold,
+    createHousehold,
+    renameHousehold,
+    joinHousehold
+  } = useHousehold(user);
 
-  const [users, setUsers] = useState<UserType[]>([]);
-  const [chores, setChores] = useState<Chore[]>([]);
-  const [logs, setLogs] = useState<LogType[]>([]);
-  const [currentUserId, setCurrentUserId] = useState<string | null>(null);
+  const [usersSnap, setUsersSnap] = useState<{ householdId: string; users: UserType[] } | null>(null);
+  const [choresSnap, setChoresSnap] = useState<{ householdId: string; chores: Chore[] } | null>(null);
+  const [logsSnap, setLogsSnap] = useState<{ householdId: string; logs: LogType[] } | null>(null);
+  const users = usersSnap?.householdId === householdId ? usersSnap.users : [];
+  const chores = choresSnap?.householdId === householdId ? choresSnap.chores : [];
+  const logs = logsSnap?.householdId === householdId ? logsSnap.logs : [];
+
+  const profileScope = user && householdId ? `${user.uid}:${householdId}` : '';
+  const [pickedProfile, setPickedProfile] = useState<{ scope: string; id: string } | null>(null);
   const [activeTab, setActiveTab] = useState<'tasks' | 'history' | 'settings'>('tasks');
   const [selectedUserId, setSelectedUserId] = useState<string | 'all'>('my_tasks');
   const [selectedChoreFilter, setSelectedChoreFilter] = useState<string | 'all'>('all');
-  const isAdmin = household?.ownerId === currentUserId;
+  const isAdmin = !!user && household?.ownerId === user.uid;
+  const localUsers = users.filter(u => !u.linkedAuth && u.id !== user?.uid);
   
   // Day Selector (0 = Sunday, 1 = Monday ...)
   const today = new Date();
@@ -168,29 +191,44 @@ export default function ChoresApp() {
   const [newChoreCustomDays, setNewChoreCustomDays] = useState<number[]>([]);
   const [newChoreUsers, setNewChoreUsers] = useState<string[]>([]);
   const [joinCode, setJoinCode] = useState('');
+  const [pendingDoneChoreId, setPendingDoneChoreId] = useState<string | null>(null);
+  const [pendingSkipChoreId, setPendingSkipChoreId] = useState<string | null>(null);
+  const [actionBusy, setActionBusy] = useState(false);
+  const [pickingProfile, setPickingProfile] = useState(false);
+  const [newHomeName, setNewHomeName] = useState('');
+  const [renameHomeName, setRenameHomeName] = useState('');
+  const [homeActionBusy, setHomeActionBusy] = useState(false);
 
   // Firebase Realtime Subscriptions
   useEffect(() => {
-    if (!householdId) {
-      setTimeout(() => {
-        setUsers([]);
-        setChores([]);
-        setLogs([]);
-      }, 0);
-      return;
-    }
+    if (!householdId) return;
 
     const unsubUsers = onSnapshot(collection(db, 'households', householdId, 'users'), (snap) => {
-      setUsers(snap.docs.map(d => ({ id: d.id, ...d.data() } as UserType)));
+      setUsersSnap({
+        householdId,
+        users: snap.docs.map(d => ({ id: d.id, ...d.data() } as UserType))
+      });
+    }, (error) => {
+      console.error(`[listener:users] households/${householdId}/users failed:`, error.code, error.message);
     });
 
     const unsubChores = onSnapshot(collection(db, 'households', householdId, 'chores'), (snap) => {
-      setChores(snap.docs.map(d => ({ id: d.id, ...d.data() } as Chore)));
+      setChoresSnap({
+        householdId,
+        chores: snap.docs.map(d => ({ id: d.id, ...d.data() } as Chore))
+      });
+    }, (error) => {
+      console.error(`[listener:chores] households/${householdId}/chores failed:`, error.code, error.message);
     });
 
     const qLogs = query(collection(db, 'households', householdId, 'logs'), orderBy('timestamp', 'desc'), limit(50));
     const unsubLogs = onSnapshot(qLogs, (snap) => {
-      setLogs(snap.docs.map(d => ({ id: d.id, ...d.data() } as LogType)));
+      setLogsSnap({
+        householdId,
+        logs: snap.docs.map(d => ({ id: d.id, ...d.data() } as LogType))
+      });
+    }, (error) => {
+      console.error(`[listener:logs] households/${householdId}/logs failed:`, error.code, error.message);
     });
 
     return () => {
@@ -200,17 +238,34 @@ export default function ChoresApp() {
     };
   }, [householdId]);
 
-  // Handle local user selection persistence
-  useEffect(() => {
-    if (householdId) {
-      const savedUserId = localStorage.getItem(`chores_user_${householdId}`);
-      if (savedUserId && !currentUserId) {
-        setTimeout(() => setCurrentUserId(savedUserId), 0);
-      } else if (currentUserId) {
-        localStorage.setItem(`chores_user_${householdId}`, currentUserId);
-      }
-    }
-  }, [currentUserId, householdId]);
+  // Prefer login profile; restore a local profile only from per-auth storage
+  let autoProfileId: string | null = null;
+  if (householdId && user && users.length > 0 && !pickingProfile) {
+    const loginProfile = users.find(u => u.id === user.uid);
+    const key = profileStorageKey(householdId, user.uid);
+    const savedUserId = typeof window !== 'undefined' ? localStorage.getItem(key) : null;
+    const savedIsLocal =
+      !!savedUserId &&
+      users.some(u => u.id === savedUserId && !u.linkedAuth && u.id !== user.uid);
+    if (savedIsLocal && savedUserId) autoProfileId = savedUserId;
+    else if (loginProfile) autoProfileId = user.uid;
+  }
+  const pickedId = pickedProfile?.scope === profileScope ? pickedProfile.id : null;
+  const currentUserId = pickingProfile ? null : (pickedId ?? autoProfileId);
+
+  const selectActingProfile = (id: string) => {
+    if (!householdId || !user) return;
+    const scope = `${user.uid}:${householdId}`;
+    setPickedProfile({ scope, id });
+    localStorage.setItem(profileStorageKey(householdId, user.uid), id);
+    setPickingProfile(false);
+  };
+
+  const resolvePhoto = (profile?: UserType | null) => {
+    if (!profile) return user?.photoURL || undefined;
+    if (profile.id === user?.uid) return profile.photoURL || user?.photoURL || undefined;
+    return profile.photoURL;
+  };
 
   if (authLoading || houseLoading) {
     return (
@@ -259,7 +314,7 @@ export default function ChoresApp() {
             className="w-full bg-[#FAF9F6] border border-[#E6E0D4] rounded-xl px-4 py-3 text-center text-[#3D3732] font-mono font-bold tracking-widest outline-none focus:border-[#A1C181]"
           />
           <button 
-            onClick={() => joinHousehold(joinCode).catch(e => alert('קוד שגוי או תקלה בחיבור'))}
+            onClick={() => joinHousehold(joinCode).catch(() => alert('קוד שגוי או תקלה בחיבור'))}
             className="w-full py-3 bg-[#3D5A80] text-white rounded-xl font-bold shadow-sm hover:bg-[#2b4261] transition-colors"
           >
             הצטרף
@@ -272,13 +327,26 @@ export default function ChoresApp() {
           <div className="h-px bg-[#E6E0D4] flex-1"></div>
         </div>
 
-        <button 
-          onClick={createHousehold}
-          className="w-full max-w-sm py-4 bg-[#A1C181] text-white rounded-2xl font-bold shadow-sm hover:bg-[#8eab72] transition-colors flex items-center justify-center gap-2"
-        >
-          <Plus className="w-5 h-5" />
-          צור בית חדש
-        </button>
+        <div className="w-full max-w-sm bg-white p-6 rounded-3xl border border-[#E6E0D4] shadow-sm flex flex-col gap-4">
+          <h2 className="font-bold text-[#6B5E4C]">צור בית חדש</h2>
+          <input
+            type="text"
+            value={newHomeName}
+            onChange={(e) => setNewHomeName(e.target.value)}
+            placeholder="שם הבית (אופציונלי)"
+            maxLength={80}
+            className="w-full bg-[#FAF9F6] border border-[#E6E0D4] rounded-xl px-4 py-3 text-center text-[#3D3732] outline-none focus:border-[#A1C181]"
+          />
+          <button 
+            onClick={() =>
+              createHousehold(newHomeName.trim() || undefined).catch(() => alert('יצירת הבית נכשלה'))
+            }
+            className="w-full py-4 bg-[#A1C181] text-white rounded-2xl font-bold shadow-sm hover:bg-[#8eab72] transition-colors flex items-center justify-center gap-2"
+          >
+            <Plus className="w-5 h-5" />
+            צור בית חדש
+          </button>
+        </div>
       </div>
     );
   }
@@ -290,28 +358,59 @@ export default function ChoresApp() {
     return d;
   });
 
-  const logAction = async (action: string, details: string) => {
+  const logAction = async (action: string, details: string, photoUrl?: string) => {
     if (!householdId || !currentUserId) return;
     const logId = `l${crypto.randomUUID().split('-')[0]}`;
-    await setDoc(doc(db, 'households', householdId, 'logs', logId), {
+    const payload: Record<string, string> = {
       userId: currentUserId,
       action,
       details,
       timestamp: new Date().toISOString()
-    }).catch(console.error);
+    };
+    if (photoUrl) payload.photoUrl = photoUrl;
+    await setDoc(doc(db, 'households', householdId, 'logs', logId), payload).catch(console.error);
+    return logId;
   };
 
-  const handleDone = async (choreId: string) => {
+  const completeDone = async (choreId: string, photoFile: File | null) => {
     if (!householdId) return;
     const chore = chores.find(c => c.id === choreId);
     if (!chore) return;
-    const activeIdx = getActiveAssigneeIndex(chore, users, chore.currentIndex);
-    const nextIdx = (activeIdx + 1) % (chore.rotation.length || 1);
-    await updateDoc(doc(db, 'households', householdId, 'chores', choreId), {
-      lastCompletedAt: selectedDate.toISOString(),
-      currentIndex: nextIdx
-    });
-    logAction('ביצוע משימה', `סיים/ה את משימת "${chore.name}"`);
+    setActionBusy(true);
+    try {
+      const logId = `l${crypto.randomUUID().split('-')[0]}`;
+      let photoUrl: string | undefined;
+      if (photoFile) {
+        try {
+          photoUrl = await uploadTaskProof(householdId, logId, photoFile);
+        } catch (err) {
+          console.error(err);
+          alert('העלאת התמונה נכשלה. אפשר לנסות שוב או לאשר בלי תמונה.');
+          setActionBusy(false);
+          return;
+        }
+      }
+      const activeIdx = getActiveAssigneeIndex(chore, users, chore.currentIndex);
+      const nextIdx = (activeIdx + 1) % (chore.rotation.length || 1);
+      await updateDoc(doc(db, 'households', householdId, 'chores', choreId), {
+        lastCompletedAt: selectedDate.toISOString(),
+        currentIndex: nextIdx
+      });
+      const payload: Record<string, string> = {
+        userId: currentUserId!,
+        action: 'ביצוע משימה',
+        details: `סיים/ה את משימת "${chore.name}"`,
+        timestamp: new Date().toISOString()
+      };
+      if (photoUrl) payload.photoUrl = photoUrl;
+      await setDoc(doc(db, 'households', householdId, 'logs', logId), payload);
+      setPendingDoneChoreId(null);
+    } catch (err) {
+      console.error(err);
+      alert('שמירת הביצוע נכשלה');
+    } finally {
+      setActionBusy(false);
+    }
   };
 
   const handleUndoDone = async (choreId: string) => {
@@ -330,52 +429,83 @@ export default function ChoresApp() {
     logAction('ביטול משימה', `ביטל/ה את סימון "${chore.name}"`);
   };
 
-  const handleSkip = async (choreId: string) => {
+  const completeSkip = async (choreId: string) => {
     if (!householdId) return;
     const chore = chores.find(c => c.id === choreId);
     if (!chore) return;
-    const activeIdx = getActiveAssigneeIndex(chore, users, chore.currentIndex);
-    const nextIdx = (activeIdx + 1) % (chore.rotation.length || 1);
-    await updateDoc(doc(db, 'households', householdId, 'chores', choreId), {
-      currentIndex: nextIdx
-    });
-    logAction('דילוג משימה', `דילג/ה על משימת "${chore.name}"`);
+    setActionBusy(true);
+    try {
+      const activeIdx = getActiveAssigneeIndex(chore, users, chore.currentIndex);
+      const nextIdx = (activeIdx + 1) % (chore.rotation.length || 1);
+      await updateDoc(doc(db, 'households', householdId, 'chores', choreId), {
+        currentIndex: nextIdx
+      });
+      await logAction('דילוג משימה', `דילג/ה על משימת "${chore.name}"`);
+      setPendingSkipChoreId(null);
+    } catch (err) {
+      console.error(err);
+      alert('הדילוג נכשל');
+    } finally {
+      setActionBusy(false);
+    }
   };
 
   const toggleAbsent = async (userId: string) => {
     if (!householdId) return;
     const u = users.find(u => u.id === userId);
     if (!u) return;
+    if (!isAdmin && userId !== user?.uid) return;
     await updateDoc(doc(db, 'households', householdId, 'users', userId), {
-      isAbsent: !u.isAbsent
+      name: u.name,
+      color: u.color,
+      isAbsent: !u.isAbsent,
+      linkedAuth: u.linkedAuth ?? (u.id === user?.uid),
+      ...(u.photoURL ? { photoURL: u.photoURL } : {})
     });
   };
 
   const handleSaveUserEdit = async () => {
-    if (!householdId || !editingUserId || !editUserName.trim()) return;
+    if (!isAdmin || !householdId || !editingUserId || !editUserName.trim()) return;
+    const u = users.find(x => x.id === editingUserId);
+    if (!u) return;
     await updateDoc(doc(db, 'households', householdId, 'users', editingUserId), {
-      name: editUserName.trim()
+      name: editUserName.trim(),
+      color: u.color,
+      isAbsent: u.isAbsent,
+      linkedAuth: u.linkedAuth ?? false,
+      ...(u.photoURL ? { photoURL: u.photoURL } : {})
     });
     setEditingUserId(null);
     setEditUserName('');
   };
 
   const handleSaveNewUser = async () => {
-    if (!householdId || !newUserName.trim()) return;
+    if (!isAdmin || !householdId || !newUserName.trim()) return;
     const colors = ['bg-[#A1C181]', 'bg-[#D4CBBF]', 'bg-[#8C7E6A]', 'bg-[#B99543]', 'bg-[#E5989B]', 'bg-[#81B29A]', 'bg-[#E07A5F]', 'bg-[#3D5A80]'];
     const randomColor = colors[Math.floor(Math.random() * colors.length)];
     const newId = `u${Date.now()}`;
     await setDoc(doc(db, 'households', householdId, 'users', newId), {
       name: newUserName.trim(),
       color: randomColor,
-      isAbsent: false
+      isAbsent: false,
+      linkedAuth: false
     });
     setIsAddingUser(false);
     setNewUserName('');
   };
 
+  const handleDeleteUser = async (userId: string) => {
+    if (!isAdmin || !householdId || !user) return;
+    if (userId === user.uid) {
+      alert('לא ניתן למחוק את פרופיל ההתחברות שלך');
+      return;
+    }
+    if (!confirm('למחוק דייר זה?')) return;
+    await deleteDoc(doc(db, 'households', householdId, 'users', userId));
+  };
+
   const handleDeleteChore = async (choreId: string) => {
-    if (!householdId) return;
+    if (!isAdmin || !householdId) return;
     const chore = chores.find(c => c.id === choreId);
     await deleteDoc(doc(db, 'households', householdId, 'chores', choreId));
     if (chore) logAction('מחיקת משימה', `מחק/ה את המשימה "${chore.name}"`);
@@ -391,7 +521,7 @@ export default function ChoresApp() {
   };
 
   const handleSaveChore = async () => {
-    if (!householdId || !newChoreName.trim() || newChoreUsers.length === 0) return;
+    if (!isAdmin || !householdId || !newChoreName.trim() || newChoreUsers.length === 0) return;
     const cid = editingChoreId || `c${crypto.randomUUID().split('-')[0]}`;
     const choreData = {
       name: newChoreName.trim(),
@@ -445,42 +575,49 @@ export default function ChoresApp() {
   };
 
   const currentUser = users.find(u => u.id === currentUserId);
+  const pendingDoneChore = chores.find(c => c.id === pendingDoneChoreId);
+  const pendingSkipChore = chores.find(c => c.id === pendingSkipChoreId);
 
-  if (users.length > 0 && !currentUserId) {
+  if (pickingProfile) {
     return (
       <div className="flex flex-col items-center justify-center min-h-screen p-6 bg-[#FAF9F6]">
-        <h1 className="text-3xl font-bold text-[#3D3732] mb-8">מי אתה?</h1>
+        <h1 className="text-3xl font-bold text-[#3D3732] mb-2">בחר פרופיל</h1>
+        <p className="text-sm text-[#8C7E6A] mb-8 text-center">אפשר לפעול בשם דייר מקומי (למשל ילד בלי טלפון)</p>
         <div className="grid grid-cols-2 gap-6 w-full max-w-sm">
-          {users.map(u => (
+          {user && (
+            <motion.button
+              whileHover={{ scale: 1.05 }}
+              whileTap={{ scale: 0.95 }}
+              onClick={() => selectActingProfile(user.uid)}
+              className="flex flex-col items-center justify-center p-6 bg-white rounded-3xl shadow-sm border border-[#A1C181] gap-4"
+            >
+              <Avatar
+                name={users.find(u => u.id === user.uid)?.name || user.displayName || 'אני'}
+                color={users.find(u => u.id === user.uid)?.color || 'bg-[#A1C181]'}
+                photoURL={resolvePhoto(users.find(u => u.id === user.uid))}
+                size="lg"
+              />
+              <span className="text-lg font-medium text-[#4A443F]">אני</span>
+            </motion.button>
+          )}
+          {localUsers.map(u => (
             <motion.button
               key={u.id}
               whileHover={{ scale: 1.05 }}
               whileTap={{ scale: 0.95 }}
-              onClick={() => setCurrentUserId(u.id)}
-              className="flex flex-col items-center justify-center p-6 bg-white rounded-3xl shadow-sm border border-[#E6E0D4] gap-4 transition-colors hover:border-[#A1C181]"
+              onClick={() => selectActingProfile(u.id)}
+              className="flex flex-col items-center justify-center p-6 bg-white rounded-3xl shadow-sm border border-[#E6E0D4] gap-4 hover:border-[#A1C181]"
             >
-              <div className={`w-16 h-16 rounded-full flex items-center justify-center text-white text-2xl font-bold shadow-sm ${u.color}`}>
-                {u.name.charAt(0)}
-              </div>
+              <Avatar name={u.name} color={u.color} photoURL={u.photoURL} size="lg" />
               <span className="text-lg font-medium text-[#4A443F]">{u.name}</span>
             </motion.button>
           ))}
         </div>
-        <button 
-          onClick={() => {
-            const name = prompt("הכנס שם לדייר החדש:");
-            if (name) {
-              const newId = `u${Date.now()}`;
-              setDoc(doc(db, 'households', householdId!, 'users', newId), {
-                name: name.trim(),
-                color: 'bg-[#A1C181]',
-                isAbsent: false
-              }).then(() => setCurrentUserId(newId));
-            }
-          }}
+        <button
+          onClick={() => setPickingProfile(false)}
           className="mt-8 text-[#8C7E6A] font-medium underline"
         >
-          או הוסף דייר חדש
+          ביטול
         </button>
       </div>
     );
@@ -533,8 +670,18 @@ export default function ChoresApp() {
                 onClick={() => setSelectedUserId(u.id)}
                 className={`flex-shrink-0 flex items-center gap-2 px-3 py-1.5 rounded-2xl transition-all border ${isSelected ? 'bg-white border-[#A1C181] shadow-sm ring-1 ring-[#A1C181]/50' : 'bg-white border-[#E6E0D4] opacity-70 hover:opacity-100 hover:bg-[#F3EFE9]'}`}
               >
-                <div className={`w-6 h-6 rounded-full flex items-center justify-center text-white text-xs ${u.color}`}>
-                  {u.name.charAt(0)}
+                <div className={`w-6 h-6 rounded-full flex items-center justify-center text-white text-xs overflow-hidden ${u.color}`}>
+                  {resolvePhoto(u) ? (
+                    // eslint-disable-next-line @next/next/no-img-element
+                    <img
+                      src={resolvePhoto(u)}
+                      alt=""
+                      referrerPolicy="no-referrer"
+                      className="w-full h-full object-cover"
+                    />
+                  ) : (
+                    u.name.charAt(0)
+                  )}
                 </div>
                 <span className={`text-sm font-medium ${isSelected ? 'text-[#3D3732]' : 'text-[#8C7E6A]'}`}>
                   {u.id === currentUserId ? 'אני' : u.name}
@@ -672,14 +819,14 @@ export default function ChoresApp() {
                   ) : (
                     <div className="flex gap-3">
                       <button
-                        onClick={() => handleDone(chore.id)}
+                        onClick={() => setPendingDoneChoreId(chore.id)}
                         className="flex-1 flex items-center justify-center gap-2 py-3.5 bg-[#A1C181] text-white rounded-2xl font-medium shadow-sm hover:bg-[#8eab72] active:scale-[0.98] transition-all"
                       >
                         <CheckCircle2 className="w-5 h-5" />
                         בוצע
                       </button>
                       <button
-                        onClick={() => handleSkip(chore.id)}
+                        onClick={() => setPendingSkipChoreId(chore.id)}
                         className="flex items-center justify-center gap-2 px-6 border border-[#E6E0D4] text-[#8C7E6A] rounded-2xl font-medium hover:bg-[#F3EFE9] active:scale-[0.98] transition-all"
                       >
                         <FastForward className="w-5 h-5" />
@@ -715,15 +862,29 @@ export default function ChoresApp() {
                 const dateStr = new Date(log.timestamp).toLocaleDateString('he-IL', { day: '2-digit', month: '2-digit' });
                 return (
                   <div key={log.id} className="flex gap-3 items-start border-b border-[#F3EFE9] pb-4 last:border-0 last:pb-0">
-                    <div className={`flex-shrink-0 w-10 h-10 rounded-full flex items-center justify-center text-white font-bold shadow-sm ${logUser?.color || 'bg-[#D4CBBF]'}`}>
-                      {logUser ? logUser.name.charAt(0) : '?'}
-                    </div>
-                    <div className="flex-1">
-                      <div className="flex justify-between items-baseline mb-1">
+                    <Avatar
+                      name={logUser?.name || '?'}
+                      color={logUser?.color || 'bg-[#D4CBBF]'}
+                      photoURL={resolvePhoto(logUser)}
+                      size="md"
+                      className="flex-shrink-0"
+                    />
+                    <div className="flex-1 min-w-0">
+                      <div className="flex justify-between items-baseline mb-1 gap-2">
                         <span className="font-bold text-[#3D3732]">{logUser?.name || 'משתמש לא ידוע'}</span>
-                        <span className="text-xs font-medium text-[#8C7E6A] bg-[#F5F1EA] px-2 py-0.5 rounded-lg">{dateStr} {timeStr}</span>
+                        <span className="text-xs font-medium text-[#8C7E6A] bg-[#F5F1EA] px-2 py-0.5 rounded-lg whitespace-nowrap">{dateStr} {timeStr}</span>
                       </div>
                       <p className="text-sm text-[#6B5E4C]">{log.details}</p>
+                      {log.photoUrl && (
+                        <a href={log.photoUrl} target="_blank" rel="noreferrer" className="block mt-2">
+                          {/* eslint-disable-next-line @next/next/no-img-element */}
+                          <img
+                            src={log.photoUrl}
+                            alt="הוכחת ביצוע"
+                            className="w-full max-h-40 object-cover rounded-xl border border-[#E6E0D4]"
+                          />
+                        </a>
+                      )}
                     </div>
                   </div>
                 );
@@ -743,16 +904,29 @@ export default function ChoresApp() {
         <section className="bg-white p-5 rounded-3xl border border-[#E6E0D4] shadow-sm flex flex-col gap-4">
           <div className="flex items-center justify-between">
             <div className="flex items-center gap-4">
-              <div className={`w-12 h-12 rounded-full flex items-center justify-center text-white text-lg font-bold shadow-sm ${currentUser?.color}`}>
-                {currentUser?.name.charAt(0)}
-              </div>
+              <Avatar
+                name={currentUser?.name || '?'}
+                color={currentUser?.color || 'bg-[#D4CBBF]'}
+                photoURL={resolvePhoto(currentUser)}
+                size="lg"
+                className="!w-12 !h-12 !text-lg"
+              />
               <div>
-                <h3 className="font-bold text-[#3D3732]">{currentUser?.name}</h3>
-                <p className="text-xs text-[#8C7E6A]">הפרופיל שלך</p>
+                <h3 className="font-bold text-[#3D3732] flex items-center gap-2">
+                  {currentUser?.name}
+                  {isAdmin && currentUserId === user?.uid && (
+                    <span className="inline-flex items-center gap-1 text-[10px] font-bold text-[#3D5A80] bg-[#3D5A80]/10 px-2 py-0.5 rounded-full">
+                      <Shield className="w-3 h-3" /> מנהל
+                    </span>
+                  )}
+                </h3>
+                <p className="text-xs text-[#8C7E6A]">
+                  {currentUserId === user?.uid ? 'מחובר עם גוגל' : 'פועל בשם דייר מקומי'}
+                </p>
               </div>
             </div>
             <button 
-              onClick={() => setCurrentUserId(null)}
+              onClick={() => setPickingProfile(true)}
               className="text-sm font-medium text-[#6B5E4C] bg-[#F5F1EA] px-4 py-2 rounded-full hover:bg-[#EAE3D5] transition-colors"
             >
               החלף
@@ -760,10 +934,41 @@ export default function ChoresApp() {
           </div>
 
           <div className="h-px bg-[#E6E0D4] w-full my-1"></div>
+
+          <div className="flex flex-col gap-3">
+            <p className="text-xs font-bold text-[#8C7E6A]">הבתים שלי</p>
+            <div className="flex flex-col gap-2">
+              {households.map((h) => {
+                const selected = h.id === householdId;
+                return (
+                  <button
+                    key={h.id}
+                    type="button"
+                    onClick={() => selectHousehold(h.id)}
+                    className={`flex items-center justify-between gap-3 px-3 py-2.5 rounded-2xl border text-right transition-colors ${
+                      selected
+                        ? 'bg-[#A1C181]/10 border-[#A1C181] ring-1 ring-[#A1C181]/40'
+                        : 'bg-[#FAF9F6] border-[#E6E0D4] hover:bg-[#F3EFE9]'
+                    }`}
+                  >
+                    <div className="min-w-0">
+                      <p className="font-bold text-[#3D3732] truncate">{householdDisplayName(h)}</p>
+                      <p className="font-mono text-[11px] text-[#8C7E6A] truncate">{h.id}</p>
+                    </div>
+                    {h.ownerId === user?.uid && (
+                      <span className="text-[10px] font-bold text-[#3D5A80] bg-[#3D5A80]/10 px-2 py-0.5 rounded-full flex-shrink-0">
+                        מנהל
+                      </span>
+                    )}
+                  </button>
+                );
+              })}
+            </div>
+          </div>
           
           <div className="flex items-center justify-between">
             <div>
-              <p className="text-xs text-[#8C7E6A]">קוד הבית (לשיתוף)</p>
+              <p className="text-xs text-[#8C7E6A]">קוד הבית הפעיל (לשיתוף)</p>
               <p className="font-mono text-[#3D3732] font-bold">{householdId}</p>
             </div>
             <button 
@@ -776,6 +981,71 @@ export default function ChoresApp() {
               <Copy className="w-5 h-5" />
             </button>
           </div>
+
+          {isAdmin && householdId && (
+            <div className="flex flex-col gap-2 pt-2 border-t border-[#E6E0D4]">
+              <p className="text-xs font-bold text-[#8C7E6A]">שם הבית הפעיל</p>
+              <div className="flex gap-2">
+                <input
+                  type="text"
+                  value={renameHomeName}
+                  onChange={(e) => setRenameHomeName(e.target.value)}
+                  placeholder={householdDisplayName(household!)}
+                  maxLength={80}
+                  className="flex-1 bg-[#FAF9F6] border border-[#E6E0D4] rounded-xl px-3 py-2 text-sm text-[#3D3732] outline-none focus:border-[#A1C181]"
+                />
+                <button
+                  disabled={homeActionBusy || !renameHomeName.trim()}
+                  onClick={async () => {
+                    if (!householdId) return;
+                    setHomeActionBusy(true);
+                    try {
+                      await renameHousehold(householdId, renameHomeName);
+                      setRenameHomeName('');
+                    } catch {
+                      alert('שינוי השם נכשל');
+                    } finally {
+                      setHomeActionBusy(false);
+                    }
+                  }}
+                  className="px-3 py-2 bg-[#3D5A80] text-white text-sm font-bold rounded-xl disabled:opacity-40"
+                >
+                  שמור
+                </button>
+              </div>
+
+              <p className="text-xs font-bold text-[#8C7E6A] mt-2">צור בית נוסף</p>
+              <div className="flex gap-2">
+                <input
+                  type="text"
+                  value={newHomeName}
+                  onChange={(e) => setNewHomeName(e.target.value)}
+                  placeholder="שם לבית החדש"
+                  maxLength={80}
+                  className="flex-1 bg-[#FAF9F6] border border-[#E6E0D4] rounded-xl px-3 py-2 text-sm text-[#3D3732] outline-none focus:border-[#A1C181]"
+                />
+                <button
+                  disabled={homeActionBusy}
+                  onClick={async () => {
+                    setHomeActionBusy(true);
+                    try {
+                      await createHousehold(newHomeName.trim() || undefined);
+                      setNewHomeName('');
+                      setActiveTab('tasks');
+                    } catch {
+                      alert('יצירת בית נכשלה');
+                    } finally {
+                      setHomeActionBusy(false);
+                    }
+                  }}
+                  className="px-3 py-2 bg-[#A1C181] text-white text-sm font-bold rounded-xl disabled:opacity-40 flex items-center gap-1"
+                >
+                  <Plus className="w-4 h-4" />
+                  צור
+                </button>
+              </div>
+            </div>
+          )}
           
           <div className="flex items-center justify-between mt-2 pt-4 border-t border-[#E6E0D4]">
              <span className="text-xs text-[#8C7E6A]">מחובר כ- {user?.email}</span>
@@ -789,6 +1059,9 @@ export default function ChoresApp() {
         <section>
           <div className="mb-4">
             <h2 className="text-xl font-bold text-[#3D3732]">דיירי הבית</h2>
+            {!isAdmin && (
+              <p className="text-xs text-[#8C7E6A] mt-1">רק מנהל הבית יכול להוסיף או לערוך דיירים מקומיים</p>
+            )}
           </div>
           <div className="bg-white border border-[#E6E0D4] rounded-3xl shadow-sm divide-y divide-[#E6E0D4] overflow-hidden">
             {users.map(u => {
@@ -808,37 +1081,57 @@ export default function ChoresApp() {
                   </div>
                 );
               }
+              const canToggleAbsent = isAdmin || u.id === user?.uid;
               return (
                 <div key={u.id} className="flex items-center justify-between p-4">
                   <div className="flex items-center gap-3">
-                    <div className={`w-10 h-10 rounded-full flex items-center justify-center text-white font-bold ${u.color} ${u.isAbsent ? 'opacity-40 grayscale' : ''}`}>
-                      {u.name.charAt(0)}
+                    <Avatar
+                      name={u.name}
+                      color={u.color}
+                      photoURL={resolvePhoto(u)}
+                      size="md"
+                      className={u.isAbsent ? 'opacity-40 grayscale' : ''}
+                    />
+                    <div>
+                      <span className={`font-medium ${u.isAbsent ? 'text-[#A39788] line-through' : 'text-[#4A443F]'}`}>
+                        {u.name}
+                      </span>
+                      <p className="text-[10px] text-[#A39788]">
+                        {u.linkedAuth || u.id === user?.uid ? 'חשבון גוגל' : 'דייר מקומי'}
+                        {household?.ownerId === u.id ? ' · מנהל' : ''}
+                      </p>
                     </div>
-                    <span className={`font-medium ${u.isAbsent ? 'text-[#A39788] line-through' : 'text-[#4A443F]'}`}>
-                      {u.name}
-                    </span>
                   </div>
                   <div className="flex gap-2">
-                    <button
-                      onClick={() => toggleAbsent(u.id)}
-                      className={`flex items-center gap-2 px-3 py-2 rounded-2xl text-xs font-medium transition-colors border ${
-                        u.isAbsent 
-                        ? 'bg-[#F3EFE9] text-[#8C7E6A] hover:bg-[#EAE3D5] border-[#E6E0D4]' 
-                        : 'bg-[#A1C181]/10 text-[#6B5E4C] hover:bg-[#A1C181]/20 border-[#A1C181]/30'
-                      }`}
-                    >
-                      {u.isAbsent ? <UserX className="w-4 h-4" /> : <UserCheck className="w-4 h-4" />}
-                      {u.isAbsent ? 'לא כאן' : 'נוכח'}
-                    </button>
-                    <button onClick={() => { setEditingUserId(u.id); setEditUserName(u.name); }} className="p-2 text-[#8C7E6A] hover:bg-[#F3EFE9] rounded-xl transition-colors">
-                      <Pencil className="w-4 h-4" />
-                    </button>
+                    {canToggleAbsent && (
+                      <button
+                        onClick={() => toggleAbsent(u.id)}
+                        className={`flex items-center gap-2 px-3 py-2 rounded-2xl text-xs font-medium transition-colors border ${
+                          u.isAbsent 
+                          ? 'bg-[#F3EFE9] text-[#8C7E6A] hover:bg-[#EAE3D5] border-[#E6E0D4]' 
+                          : 'bg-[#A1C181]/10 text-[#6B5E4C] hover:bg-[#A1C181]/20 border-[#A1C181]/30'
+                        }`}
+                      >
+                        {u.isAbsent ? <UserX className="w-4 h-4" /> : <UserCheck className="w-4 h-4" />}
+                        {u.isAbsent ? 'לא כאן' : 'נוכח'}
+                      </button>
+                    )}
+                    {isAdmin && !u.linkedAuth && u.id !== user?.uid && (
+                      <>
+                        <button onClick={() => { setEditingUserId(u.id); setEditUserName(u.name); }} className="p-2 text-[#8C7E6A] hover:bg-[#F3EFE9] rounded-xl transition-colors">
+                          <Pencil className="w-4 h-4" />
+                        </button>
+                        <button onClick={() => handleDeleteUser(u.id)} className="p-2 text-rose-400 hover:bg-rose-50 rounded-xl transition-colors">
+                          <Trash2 className="w-4 h-4" />
+                        </button>
+                      </>
+                    )}
                   </div>
                 </div>
               );
             })}
             
-            {isAddingUser ? (
+            {isAdmin && (isAddingUser ? (
               <div className="p-4 flex items-center gap-3 bg-[#FAF9F6]">
                 <input
                   type="text"
@@ -862,13 +1155,14 @@ export default function ChoresApp() {
                 className="w-full p-4 flex items-center justify-center gap-2 text-[#8C7E6A] hover:bg-[#F3EFE9] transition-colors"
               >
                 <Plus className="w-4 h-4" />
-                <span className="font-medium text-sm">הוסף בן/בת בית</span>
+                <span className="font-medium text-sm">הוסף דייר מקומי</span>
               </button>
-            )}
+            ))}
           </div>
         </section>
 
-        {/* Task Management */}
+        {/* Task Management — admin only */}
+        {isAdmin && (
         <section>
           <div className="mb-4">
             <h2 className="text-xl font-bold text-[#3D3732]">ניהול משימות</h2>
@@ -1052,15 +1346,61 @@ export default function ChoresApp() {
             )}
           </div>
         </section>
+        )}
       </div>
     );
   };
 
+  if (householdId && !currentUserId) {
+    return (
+      <div className="min-h-screen bg-[#FAF9F6] flex items-center justify-center">
+        <div className="animate-spin rounded-full h-8 w-8 border-b-2 border-[#A1C181]"></div>
+      </div>
+    );
+  }
+
   return (
     <div className="max-w-md mx-auto min-h-screen bg-[#FAF9F6] relative flex flex-col">
-      <header className="sticky top-0 z-10 bg-[#FAF9F6]/80 backdrop-blur-xl border-b border-[#E6E0D4] px-6 py-4 flex flex-col items-center">
+      {pendingDoneChore && (
+        <DoneConfirmModal
+          choreName={pendingDoneChore.name}
+          busy={actionBusy}
+          onConfirm={(file) => completeDone(pendingDoneChore.id, file)}
+          onCancel={() => !actionBusy && setPendingDoneChoreId(null)}
+        />
+      )}
+      {pendingSkipChore && (
+        <SkipConfirmModal
+          choreName={pendingSkipChore.name}
+          busy={actionBusy}
+          onConfirm={() => completeSkip(pendingSkipChore.id)}
+          onCancel={() => !actionBusy && setPendingSkipChoreId(null)}
+        />
+      )}
+      <header className="sticky top-0 z-10 bg-[#FAF9F6]/80 backdrop-blur-xl border-b border-[#E6E0D4] px-6 py-4 flex flex-col items-center gap-2">
         <h1 className="text-2xl font-extrabold text-[#3D3732] text-center tracking-tight">תורנויות הבית</h1>
-        <p className="text-[10px] text-[#A39788] font-medium uppercase tracking-wider mt-1">פותח על ידי דניאל כהן</p>
+        <p className="text-[10px] text-[#A39788] font-medium uppercase tracking-wider">פותח על ידי דניאל כהן</p>
+        {households.length > 1 && household && (
+          <label className="w-full max-w-xs">
+            <span className="sr-only">החלף בית</span>
+            <select
+              value={householdId || ''}
+              onChange={(e) => selectHousehold(e.target.value)}
+              className="w-full mt-1 bg-white border border-[#E6E0D4] rounded-xl px-3 py-2 text-sm font-medium text-[#3D3732] outline-none focus:border-[#A1C181]"
+            >
+              {households.map((h) => (
+                <option key={h.id} value={h.id}>
+                  {householdDisplayName(h)}
+                </option>
+              ))}
+            </select>
+          </label>
+        )}
+        {households.length === 1 && household && (
+          <p className="text-xs text-[#8C7E6A] font-medium truncate max-w-full">
+            {householdDisplayName(household)}
+          </p>
+        )}
       </header>
 
       <main className="flex-1 px-6 pt-6 overflow-y-auto">

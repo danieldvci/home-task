@@ -12,14 +12,16 @@
     },
     "User": {
       "title": "User",
-      "description": "A local household user profile",
+      "description": "Household profile — Google-linked or local guest",
       "type": "object",
       "properties": {
         "name": { "type": "string", "maxLength": 100 },
-        "color": { "type": "string", "maxLength": 20 },
-        "isAbsent": { "type": "boolean" }
+        "color": { "type": "string", "maxLength": 50 },
+        "isAbsent": { "type": "boolean" },
+        "linkedAuth": { "type": "boolean" },
+        "photoURL": { "type": "string", "maxLength": 2000 }
       },
-      "required": ["name", "color", "isAbsent"]
+      "required": ["name", "color", "isAbsent", "linkedAuth"]
     },
     "Chore": {
       "title": "Chore",
@@ -31,7 +33,7 @@
         "customDays": { "type": "array", "maxLength": 7 },
         "rotation": { "type": "array", "maxLength": 20 },
         "currentIndex": { "type": "number" },
-        "lastCompletedAt": { "type": "string", "maxLength": 30 }
+        "lastCompletedAt": { "type": "string", "maxLength": 40 }
       },
       "required": ["name", "frequency", "rotation", "currentIndex"]
     },
@@ -43,7 +45,8 @@
         "userId": { "type": "string", "maxLength": 128 },
         "action": { "type": "string", "maxLength": 100 },
         "details": { "type": "string", "maxLength": 200 },
-        "timestamp": { "type": "string", "maxLength": 30 }
+        "timestamp": { "type": "string", "maxLength": 40 },
+        "photoUrl": { "type": "string", "maxLength": 2000 }
       },
       "required": ["userId", "action", "details", "timestamp"]
     }

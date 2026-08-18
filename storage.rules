@@ -1,0 +1,21 @@
+rules_version = '2';
+service firebase.storage {
+  match /b/{bucket}/o {
+    function isSignedIn() {
+      return request.auth != null;
+    }
+
+    function isMember(householdId) {
+      return isSignedIn()
+        && firestore.exists(/databases/(default)/documents/households/$(householdId))
+        && request.auth.uid in firestore.get(/databases/(default)/documents/households/$(householdId)).data.members;
+    }
+
+    match /households/{householdId}/proofs/{fileName} {
+      allow read: if isMember(householdId);
+      allow write: if isMember(householdId)
+        && request.resource.size < 3 * 1024 * 1024
+        && request.resource.contentType.matches('image/jpeg');
+    }
+  }
+}
