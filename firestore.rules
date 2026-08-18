@@ -49,8 +49,9 @@ service cloud.firestore {
     function isValidChoreStrict(data) {
       let hasCustom = data.keys().hasAny(['customDays']);
       let hasLastComp = data.keys().hasAny(['lastCompletedAt']);
+      let hasCategory = data.keys().hasAny(['category']);
       let baseSize = 4;
-      let totalSize = baseSize + (hasCustom ? 1 : 0) + (hasLastComp ? 1 : 0);
+      let totalSize = baseSize + (hasCustom ? 1 : 0) + (hasLastComp ? 1 : 0) + (hasCategory ? 1 : 0);
 
       return data.keys().hasAll(['name', 'frequency', 'rotation', 'currentIndex'])
         && data.keys().size() == totalSize
@@ -59,7 +60,16 @@ service cloud.firestore {
         && data.rotation is list && data.rotation.size() <= 20
         && data.currentIndex is number
         && (!hasCustom || (data.customDays is list && data.customDays.size() <= 7))
-        && (!hasLastComp || (data.lastCompletedAt == null || (data.lastCompletedAt is string && data.lastCompletedAt.size() <= 40)));
+        && (!hasLastComp || (data.lastCompletedAt == null || (data.lastCompletedAt is string && data.lastCompletedAt.size() <= 40)))
+        && (!hasCategory || (data.category is string && data.category.size() <= 40));
+    }
+
+    // A non-owner member may only reorder an existing rotation (e.g. to swap
+    // turns with another resident), never add, remove, or duplicate entries.
+    function isRotationPermutation(incomingRotation, existingRotation) {
+      return incomingRotation.size() == existingRotation.size()
+        && incomingRotation.hasAll(existingRotation)
+        && existingRotation.hasAll(incomingRotation);
     }
 
     function isValidLog(data) {
@@ -72,6 +82,38 @@ service cloud.firestore {
         && (!data.keys().hasAny(['photoUrl']) || (data.photoUrl is string && data.photoUrl.size() <= 2000));
     }
 
+    function isValidMembersList(m) {
+      return m is list && m.size() > 0 && m.size() <= 20 && m[0] is string;
+    }
+
+    // Non-member adds only themselves (+1).
+    function isMembersJoin() {
+      return incoming().members.hasAll(existing().members)
+        && incoming().members.size() == existing().members.size() + 1
+        && request.auth.uid in incoming().members
+        && !(request.auth.uid in existing().members);
+    }
+
+    // Exactly one uid dropped from members.
+    function isSingleMemberRemoval() {
+      return existing().members.size() == incoming().members.size() + 1
+        && existing().members.hasAll(incoming().members);
+    }
+
+    // Owner removes another member (owner must remain in members).
+    function isOwnerRemovingOther(hid) {
+      return isOwner(hid)
+        && isSingleMemberRemoval()
+        && request.auth.uid in incoming().members;
+    }
+
+    // Any current member may remove only themselves.
+    function isSelfLeave() {
+      return isSingleMemberRemoval()
+        && request.auth.uid in existing().members
+        && !(request.auth.uid in incoming().members);
+    }
+
     match /households/{householdId} {
       allow get: if isSignedIn() && isValidId(householdId);
       allow list: if isSignedIn() && request.auth.uid in resource.data.members;
@@ -82,25 +124,15 @@ service cloud.firestore {
         && incoming().ownerId == request.auth.uid
         && request.auth.uid in incoming().members;
 
-      // Join: members-only field; rename: owner may set name only
+      // Join (+1 self), owner disconnects other, or self-leave; rename: owner name only
       allow update: if isSignedIn()
         && isValidId(householdId)
         && incoming().ownerId == existing().ownerId
         && (
           (
             incoming().diff(existing()).affectedKeys().hasOnly(['members'])
-            && incoming().members is list
-            && incoming().members.size() > 0
-            && incoming().members.size() <= 20
-            && incoming().members[0] is string
-            && (
-              request.auth.uid in existing().members
-              || (
-                incoming().members.hasAll(existing().members)
-                && incoming().members.size() == existing().members.size() + 1
-                && request.auth.uid in incoming().members
-              )
-            )
+            && isValidMembersList(incoming().members)
+            && (isMembersJoin() || isOwnerRemovingOther(householdId) || isSelfLeave())
           )
           || (
             isOwner(householdId)
@@ -156,7 +188,13 @@ service cloud.firestore {
           && isValidChoreStrict(incoming())
           && (
             isOwner(householdId)
-            || incoming().diff(existing()).affectedKeys().hasOnly(['currentIndex', 'lastCompletedAt'])
+            || (
+              incoming().diff(existing()).affectedKeys().hasOnly(['currentIndex', 'lastCompletedAt', 'rotation'])
+              && (
+                !incoming().diff(existing()).affectedKeys().hasAny(['rotation'])
+                || isRotationPermutation(incoming().rotation, existing().rotation)
+              )
+            )
           );
 
         allow delete: if isOwner(householdId) && isValidId(householdId) && isValidId(choreId);

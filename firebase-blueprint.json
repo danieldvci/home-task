@@ -31,6 +31,7 @@
         "name": { "type": "string", "maxLength": 100 },
         "frequency": { "type": "string", "enum": ["daily", "weekly", "custom_days"] },
         "customDays": { "type": "array", "maxLength": 7 },
+        "category": { "type": "string", "maxLength": 40 },
         "rotation": { "type": "array", "maxLength": 20 },
         "currentIndex": { "type": "number" },
         "lastCompletedAt": { "type": "string", "maxLength": 40 }

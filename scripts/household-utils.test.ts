@@ -31,6 +31,14 @@ assert.equal(
   null
 );
 assert.equal(mergeAuthPhoto({ photoURL: 'old' }, null), null);
+// Custom upload must not be replaced by Google photo on reload
+assert.equal(
+  mergeAuthPhoto(
+    { photoURL: 'https://firebasestorage.googleapis.com/v0/b/x/o/avatars%2Fu.jpg?alt=media' },
+    'https://lh3.googleusercontent.com/a/x'
+  ),
+  null
+);
 
 const id = generateHouseholdId();
 assert.match(id, /^h[a-z0-9]{10}$/);

@@ -2,6 +2,7 @@ import type {Metadata, Viewport} from 'next';
 import { Rubik } from 'next/font/google';
 import './globals.css';
 import { InstallPrompt } from '../components/InstallPrompt';
+import { ToastProvider } from '../components/Toast';
 
 const rubik = Rubik({ subsets: ['hebrew', 'latin'] });
 
@@ -42,8 +43,10 @@ export default function RootLayout({children}: {children: React.ReactNode}) {
   return (
     <html lang="he" dir="rtl">
       <body className={`${rubik.className} bg-[#FAF9F6] text-[#4A443F] min-h-screen`} suppressHydrationWarning>
-        {children}
-        <InstallPrompt />
+        <ToastProvider>
+          {children}
+          <InstallPrompt />
+        </ToastProvider>
       </body>
     </html>
   );

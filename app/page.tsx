@@ -1,6 +1,6 @@
 'use client';
 
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef, useSyncExternalStore } from 'react';
 import { 
   CheckCircle2, 
   FastForward, 
@@ -8,6 +8,7 @@ import {
   ListTodo, 
   UserX, 
   UserCheck,
+  UserMinus,
   Check,
   Plus,
   Trash2,
@@ -19,16 +20,30 @@ import {
   X,
   History,
   Activity,
-  Shield
+  Shield,
+  Camera,
+  Repeat,
+  Trophy,
+  AlertTriangle,
+  Loader2
 } from 'lucide-react';
 import { motion, AnimatePresence } from 'motion/react';
 import { useAuth, useHousehold } from '../lib/hooks';
 import { db } from '../lib/firebase';
 import { collection, doc, onSnapshot, setDoc, deleteDoc, updateDoc, query, orderBy, limit } from 'firebase/firestore';
-import { uploadTaskProof } from '../lib/storage-upload';
+import { uploadTaskProof, uploadUserAvatar, validateAvatarFile } from '../lib/storage-upload';
 import { Avatar } from '../components/Avatar';
-import { DoneConfirmModal, SkipConfirmModal } from '../components/TaskModals';
+import { DoneConfirmModal, SkipConfirmModal, SwapTurnModal } from '../components/TaskModals';
 import { householdDisplayName, profileStorageKey } from '../lib/household-utils';
+import { useToast } from '../components/Toast';
+import {
+  disableReminders,
+  enableReminders,
+  maybeShowTurnReminder,
+  remindersEnabled,
+  remindersSupported
+} from '../lib/notifications';
+import { BellRing, BellOff } from 'lucide-react';
 
 // --- Types ---
 type UserType = {
@@ -39,11 +54,14 @@ type UserType = {
   linkedAuth?: boolean;
   photoURL?: string;
 };
+const CHORE_CATEGORIES = ['מטבח', 'סלון', 'חדר שינה', 'אמבטיה', 'חוץ', 'אחר'];
+
 type Chore = { 
   id: string; 
   name: string; 
   frequency: 'daily' | 'weekly' | 'custom_days'; 
   customDays?: number[];
+  category?: string;
   rotation: string[]; 
   currentIndex: number; 
   lastCompletedAt: string | null 
@@ -57,6 +75,9 @@ type LogType = {
   photoUrl?: string;
 };
 
+const MEMBER_SOFT_LIMIT = 20;
+const noopSubscribe = () => () => {};
+
 // --- Helper Functions ---
 const getActiveAssigneeIndex = (chore: Chore, users: UserType[], startIndex: number) => {
   if (!chore.rotation || chore.rotation.length === 0) return -1;
@@ -67,6 +88,65 @@ const getActiveAssigneeIndex = (chore: Chore, users: UserType[], startIndex: num
     if (user && !user.isAbsent) return checkIndex;
   }
   return startIndex;
+};
+
+// Next active (non-absent) rotation slot strictly after `fromIndex`.
+const getNextActiveIndex = (chore: Chore, users: UserType[], fromIndex: number) => {
+  if (!chore.rotation || chore.rotation.length === 0) return 0;
+  const start = (fromIndex + 1) % chore.rotation.length;
+  return getActiveAssigneeIndex(chore, users, start);
+};
+
+// Previous active (non-absent) rotation slot strictly before `fromIndex`
+// (mirrors getNextActiveIndex so undo can reverse a forward advance).
+const getPrevActiveIndex = (chore: Chore, users: UserType[], fromIndex: number) => {
+  if (!chore.rotation || chore.rotation.length === 0) return 0;
+  const len = chore.rotation.length;
+  for (let i = 1; i <= len; i++) {
+    const checkIndex = ((fromIndex - i) % len + len) % len;
+    const userId = chore.rotation[checkIndex];
+    const user = users.find(u => u.id === userId);
+    if (user && !user.isAbsent) return checkIndex;
+  }
+  return ((fromIndex - 1) % len + len) % len;
+};
+
+const normalizeDay = (d: Date) => {
+  const nd = new Date(d);
+  nd.setHours(0, 0, 0, 0);
+  return nd;
+};
+
+// Whether a chore is scheduled to occur on `date`, using `anchorDate` as the
+// weekly reference point (matches the direction-agnostic math used by
+// getOccurrencesBetween below, so display and rotation math stay in sync).
+const choreOccursOnDate = (chore: Chore, date: Date, anchorDate: Date) => {
+  if (chore.frequency === 'daily') return true;
+  if (chore.frequency === 'custom_days') return !!chore.customDays?.includes(date.getDay());
+  const d = normalizeDay(date).getTime();
+  const a = normalizeDay(anchorDate).getTime();
+  const diffDays = Math.round(Math.abs(d - a) / (1000 * 60 * 60 * 24));
+  return diffDays % 7 === 0;
+};
+
+// Expected days between occurrences, used for the chore "health" indicator.
+const expectedIntervalDays = (chore: Chore) => {
+  if (chore.frequency === 'daily') return 1;
+  if (chore.frequency === 'weekly') return 7;
+  if (chore.frequency === 'custom_days' && chore.customDays && chore.customDays.length > 0) {
+    return Math.max(1, Math.round(7 / chore.customDays.length));
+  }
+  return 7;
+};
+
+const getChoreHealth = (chore: Chore, referenceDate: Date) => {
+  const expected = expectedIntervalDays(chore);
+  if (!chore.lastCompletedAt) return { daysSince: null as number | null, expected, overdueBy: null as number | null };
+  const last = new Date(chore.lastCompletedAt);
+  const daysSince = Math.floor(
+    (normalizeDay(referenceDate).getTime() - normalizeDay(last).getTime()) / (1000 * 60 * 60 * 24)
+  );
+  return { daysSince, expected, overdueBy: daysSince - expected };
 };
 
 const getOccurrencesBetween = (chore: Chore, startDate: Date, endDate: Date) => {
@@ -146,6 +226,7 @@ const isDoneOnDay = (chore: Chore, targetDayStr: string) => {
 
 // --- Main App Component ---
 export default function ChoresApp() {
+  const { showToast } = useToast();
   const { user, loading: authLoading, login, logout } = useAuth();
   const {
     households,
@@ -170,6 +251,7 @@ export default function ChoresApp() {
   const [activeTab, setActiveTab] = useState<'tasks' | 'history' | 'settings'>('tasks');
   const [selectedUserId, setSelectedUserId] = useState<string | 'all'>('my_tasks');
   const [selectedChoreFilter, setSelectedChoreFilter] = useState<string | 'all'>('all');
+  const [selectedCategoryFilter, setSelectedCategoryFilter] = useState<string | 'all'>('all');
   const isAdmin = !!user && household?.ownerId === user.uid;
   const localUsers = users.filter(u => !u.linkedAuth && u.id !== user?.uid);
   
@@ -190,14 +272,26 @@ export default function ChoresApp() {
   const [newChoreFreq, setNewChoreFreq] = useState<'daily' | 'weekly' | 'custom_days'>('daily');
   const [newChoreCustomDays, setNewChoreCustomDays] = useState<number[]>([]);
   const [newChoreUsers, setNewChoreUsers] = useState<string[]>([]);
+  const [newChoreCategory, setNewChoreCategory] = useState<string>('');
   const [joinCode, setJoinCode] = useState('');
   const [pendingDoneChoreId, setPendingDoneChoreId] = useState<string | null>(null);
   const [pendingSkipChoreId, setPendingSkipChoreId] = useState<string | null>(null);
+  const [pendingSwapChoreId, setPendingSwapChoreId] = useState<string | null>(null);
   const [actionBusy, setActionBusy] = useState(false);
   const [pickingProfile, setPickingProfile] = useState(false);
   const [newHomeName, setNewHomeName] = useState('');
   const [renameHomeName, setRenameHomeName] = useState('');
   const [homeActionBusy, setHomeActionBusy] = useState(false);
+  const avatarInputRef = useRef<HTMLInputElement>(null);
+  const [avatarUploadTargetId, setAvatarUploadTargetId] = useState<string | null>(null);
+  const [avatarUploadRequestId, setAvatarUploadRequestId] = useState(0);
+  const [avatarUploading, setAvatarUploading] = useState(false);
+  // Reads localStorage + Notification.permission; read after hydration so
+  // server and client markup agree, and re-evaluated on every render (no
+  // separate effect/setState needed since the whole page already re-renders
+  // on Firestore updates and user interaction).
+  const [, setReminderBump] = useState(0);
+  const remindersOn = useSyncExternalStore(noopSubscribe, () => remindersEnabled(), () => false);
 
   // Firebase Realtime Subscriptions
   useEffect(() => {
@@ -267,6 +361,34 @@ export default function ChoresApp() {
     return profile.photoURL;
   };
 
+  // If browser reminders are enabled, nudge the acting resident once per day
+  // about chores that are their turn today and not yet done.
+  useEffect(() => {
+    if (!remindersOn || !currentUserId || chores.length === 0) return;
+    const todayStr = today.toDateString();
+    const myUndoneToday = chores
+      .filter(c => choreOccursOnDate(c, today, today) && !isDoneOnDay(c, todayStr))
+      .filter(c => {
+        const activeIdx = getActiveAssigneeIndex(c, users, c.currentIndex);
+        return c.rotation[activeIdx] === currentUserId;
+      })
+      .map(c => c.name);
+    if (myUndoneToday.length > 0) {
+      maybeShowTurnReminder(todayStr, currentUserId, myUndoneToday);
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [remindersOn, currentUserId, chores, users]);
+
+  // Open the (hidden) file picker whenever an avatar upload is requested.
+  // Kept in an effect (rather than the click handlers) so the ref is only
+  // ever read outside of render; the request id lets the same resident be
+  // targeted twice in a row and still reopen the dialog.
+  useEffect(() => {
+    if (avatarUploadRequestId > 0) {
+      avatarInputRef.current?.click();
+    }
+  }, [avatarUploadRequestId]);
+
   if (authLoading || houseLoading) {
     return (
       <div className="min-h-screen bg-[#FAF9F6] flex items-center justify-center">
@@ -284,7 +406,7 @@ export default function ChoresApp() {
         <h1 className="text-3xl font-extrabold text-[#3D3732] mb-2 tracking-tight">תורנויות הבית</h1>
         <p className="text-[#8C7E6A] mb-10 max-w-xs">התחבר כדי לנהל את מטלות הבית שלכם בסנכרון מלא לכל בני המשפחה.</p>
         <button 
-          onClick={login}
+          onClick={() => login().catch(() => showToast('ההתחברות נכשלה. נסה שוב.'))}
           className="flex items-center gap-3 bg-white border border-[#E6E0D4] px-8 py-4 rounded-2xl shadow-sm text-[#4A443F] font-bold hover:bg-[#F5F1EA] transition-all active:scale-95"
         >
           <svg width="24" height="24" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
@@ -314,7 +436,7 @@ export default function ChoresApp() {
             className="w-full bg-[#FAF9F6] border border-[#E6E0D4] rounded-xl px-4 py-3 text-center text-[#3D3732] font-mono font-bold tracking-widest outline-none focus:border-[#A1C181]"
           />
           <button 
-            onClick={() => joinHousehold(joinCode).catch(() => alert('קוד שגוי או תקלה בחיבור'))}
+            onClick={() => joinHousehold(joinCode).catch(() => showToast('קוד שגוי או תקלה בחיבור'))}
             className="w-full py-3 bg-[#3D5A80] text-white rounded-xl font-bold shadow-sm hover:bg-[#2b4261] transition-colors"
           >
             הצטרף
@@ -339,7 +461,7 @@ export default function ChoresApp() {
           />
           <button 
             onClick={() =>
-              createHousehold(newHomeName.trim() || undefined).catch(() => alert('יצירת הבית נכשלה'))
+              createHousehold(newHomeName.trim() || undefined).catch(() => showToast('יצירת הבית נכשלה'))
             }
             className="w-full py-4 bg-[#A1C181] text-white rounded-2xl font-bold shadow-sm hover:bg-[#8eab72] transition-colors flex items-center justify-center gap-2"
           >
@@ -391,7 +513,7 @@ export default function ChoresApp() {
         }
       }
       const activeIdx = getActiveAssigneeIndex(chore, users, chore.currentIndex);
-      const nextIdx = (activeIdx + 1) % (chore.rotation.length || 1);
+      const nextIdx = getNextActiveIndex(chore, users, activeIdx);
       await updateDoc(doc(db, 'households', householdId, 'chores', choreId), {
         lastCompletedAt: selectedDate.toISOString(),
         currentIndex: nextIdx
@@ -407,7 +529,7 @@ export default function ChoresApp() {
       setPendingDoneChoreId(null);
     } catch (err) {
       console.error(err);
-      alert('שמירת הביצוע נכשלה');
+      showToast('שמירת הביצוע נכשלה');
     } finally {
       setActionBusy(false);
     }
@@ -417,16 +539,22 @@ export default function ChoresApp() {
     if (!householdId) return;
     const chore = chores.find(c => c.id === choreId);
     if (!chore) return;
-    
-    // Reverse the rotation index
-    let prevIdx = chore.currentIndex - 1;
-    if (prevIdx < 0) prevIdx = Math.max(0, (chore.rotation?.length || 1) - 1);
 
-    await updateDoc(doc(db, 'households', householdId, 'chores', choreId), {
-      lastCompletedAt: null,
-      currentIndex: prevIdx
-    });
-    logAction('ביטול משימה', `ביטל/ה את סימון "${chore.name}"`);
+    // Reverse to whoever was active immediately before this completion,
+    // skipping absent users the same way forward-advance does.
+    const activeIdx = getActiveAssigneeIndex(chore, users, chore.currentIndex);
+    const prevIdx = getPrevActiveIndex(chore, users, activeIdx);
+
+    try {
+      await updateDoc(doc(db, 'households', householdId, 'chores', choreId), {
+        lastCompletedAt: null,
+        currentIndex: prevIdx
+      });
+      await logAction('ביטול משימה', `ביטל/ה את סימון "${chore.name}"`);
+    } catch (err) {
+      console.error(err);
+      showToast('ביטול הסימון נכשל');
+    }
   };
 
   const completeSkip = async (choreId: string) => {
@@ -436,7 +564,7 @@ export default function ChoresApp() {
     setActionBusy(true);
     try {
       const activeIdx = getActiveAssigneeIndex(chore, users, chore.currentIndex);
-      const nextIdx = (activeIdx + 1) % (chore.rotation.length || 1);
+      const nextIdx = getNextActiveIndex(chore, users, activeIdx);
       await updateDoc(doc(db, 'households', householdId, 'chores', choreId), {
         currentIndex: nextIdx
       });
@@ -444,7 +572,33 @@ export default function ChoresApp() {
       setPendingSkipChoreId(null);
     } catch (err) {
       console.error(err);
-      alert('הדילוג נכשל');
+      showToast('הדילוג נכשל');
+    } finally {
+      setActionBusy(false);
+    }
+  };
+
+  const completeSwap = async (choreId: string, targetUserId: string) => {
+    if (!householdId) return;
+    const chore = chores.find(c => c.id === choreId);
+    if (!chore) return;
+    setActionBusy(true);
+    try {
+      const activeIdx = getActiveAssigneeIndex(chore, users, chore.currentIndex);
+      const targetIdx = chore.rotation.indexOf(targetUserId);
+      if (targetIdx === -1 || targetIdx === activeIdx) throw new Error('invalid_swap_target');
+      const newRotation = [...chore.rotation];
+      [newRotation[activeIdx], newRotation[targetIdx]] = [newRotation[targetIdx], newRotation[activeIdx]];
+      await updateDoc(doc(db, 'households', householdId, 'chores', choreId), {
+        rotation: newRotation
+      });
+      const fromName = users.find(u => u.id === chore.rotation[activeIdx])?.name || 'מישהו';
+      const toName = users.find(u => u.id === targetUserId)?.name || 'מישהו';
+      await logAction('החלפת תור', `${fromName} החליף/ה תורות עם ${toName} במשימת "${chore.name}"`);
+      setPendingSwapChoreId(null);
+    } catch (err) {
+      console.error(err);
+      showToast('ההחלפה נכשלה');
     } finally {
       setActionBusy(false);
     }
@@ -455,60 +609,158 @@ export default function ChoresApp() {
     const u = users.find(u => u.id === userId);
     if (!u) return;
     if (!isAdmin && userId !== user?.uid) return;
-    await updateDoc(doc(db, 'households', householdId, 'users', userId), {
-      name: u.name,
-      color: u.color,
-      isAbsent: !u.isAbsent,
-      linkedAuth: u.linkedAuth ?? (u.id === user?.uid),
-      ...(u.photoURL ? { photoURL: u.photoURL } : {})
-    });
+    try {
+      await updateDoc(doc(db, 'households', householdId, 'users', userId), {
+        name: u.name,
+        color: u.color,
+        isAbsent: !u.isAbsent,
+        linkedAuth: u.linkedAuth ?? (u.id === user?.uid),
+        ...(u.photoURL ? { photoURL: u.photoURL } : {})
+      });
+    } catch (err) {
+      console.error(err);
+      showToast('עדכון הסטטוס נכשל');
+    }
   };
 
   const handleSaveUserEdit = async () => {
     if (!isAdmin || !householdId || !editingUserId || !editUserName.trim()) return;
     const u = users.find(x => x.id === editingUserId);
     if (!u) return;
-    await updateDoc(doc(db, 'households', householdId, 'users', editingUserId), {
-      name: editUserName.trim(),
-      color: u.color,
-      isAbsent: u.isAbsent,
-      linkedAuth: u.linkedAuth ?? false,
-      ...(u.photoURL ? { photoURL: u.photoURL } : {})
-    });
-    setEditingUserId(null);
-    setEditUserName('');
+    try {
+      await updateDoc(doc(db, 'households', householdId, 'users', editingUserId), {
+        name: editUserName.trim(),
+        color: u.color,
+        isAbsent: u.isAbsent,
+        linkedAuth: u.linkedAuth ?? false,
+        ...(u.photoURL ? { photoURL: u.photoURL } : {})
+      });
+      setEditingUserId(null);
+      setEditUserName('');
+    } catch (err) {
+      console.error(err);
+      showToast('שמירת השינוי נכשלה');
+    }
   };
 
   const handleSaveNewUser = async () => {
     if (!isAdmin || !householdId || !newUserName.trim()) return;
+    if (users.length >= MEMBER_SOFT_LIMIT) {
+      showToast(`הגעתם למגבלת ${MEMBER_SOFT_LIMIT} דיירים בבית`);
+      return;
+    }
     const colors = ['bg-[#A1C181]', 'bg-[#D4CBBF]', 'bg-[#8C7E6A]', 'bg-[#B99543]', 'bg-[#E5989B]', 'bg-[#81B29A]', 'bg-[#E07A5F]', 'bg-[#3D5A80]'];
     const randomColor = colors[Math.floor(Math.random() * colors.length)];
     const newId = `u${Date.now()}`;
-    await setDoc(doc(db, 'households', householdId, 'users', newId), {
-      name: newUserName.trim(),
-      color: randomColor,
-      isAbsent: false,
-      linkedAuth: false
-    });
-    setIsAddingUser(false);
-    setNewUserName('');
+    try {
+      await setDoc(doc(db, 'households', householdId, 'users', newId), {
+        name: newUserName.trim(),
+        color: randomColor,
+        isAbsent: false,
+        linkedAuth: false
+      });
+      setIsAddingUser(false);
+      setNewUserName('');
+    } catch (err) {
+      console.error(err);
+      showToast('הוספת הדייר נכשלה');
+    }
+  };
+
+  // Scrub a resident out of every chore rotation and fix currentIndex.
+  const removeUserFromChores = async (userId: string) => {
+    if (!householdId) return;
+    const affectedChores = chores.filter(c => c.rotation?.includes(userId));
+    await Promise.all(
+      affectedChores.map(chore => {
+        const removedIndex = chore.rotation.indexOf(userId);
+        const newRotation = chore.rotation.filter(id => id !== userId);
+        let newIndex = 0;
+        if (newRotation.length > 0) {
+          newIndex =
+            removedIndex < chore.currentIndex
+              ? (chore.currentIndex - 1 + newRotation.length) % newRotation.length
+              : chore.currentIndex % newRotation.length;
+        }
+        return updateDoc(doc(db, 'households', householdId, 'chores', chore.id), {
+          rotation: newRotation,
+          currentIndex: newIndex
+        });
+      })
+    );
   };
 
   const handleDeleteUser = async (userId: string) => {
     if (!isAdmin || !householdId || !user) return;
     if (userId === user.uid) {
-      alert('לא ניתן למחוק את פרופיל ההתחברות שלך');
+      showToast('לא ניתן למחוק את פרופיל ההתחברות שלך');
       return;
     }
-    if (!confirm('למחוק דייר זה?')) return;
-    await deleteDoc(doc(db, 'households', householdId, 'users', userId));
+    if (!confirm('למחוק דייר זה? הוא/היא יוסר/ו גם מכל סבבי המשימות.')) return;
+    try {
+      await removeUserFromChores(userId);
+      await deleteDoc(doc(db, 'households', householdId, 'users', userId));
+    } catch (err) {
+      console.error(err);
+      showToast('מחיקת הדייר נכשלה');
+    }
+  };
+
+  // Admin removes a Google-linked member; they must rejoin with the house code.
+  const handleDisconnectMember = async (userId: string) => {
+    if (!isAdmin || !householdId || !user || !household) return;
+    if (userId === user.uid) {
+      showToast('לא ניתן לנתק את עצמך מהבית');
+      return;
+    }
+    const target = users.find(u => u.id === userId);
+    if (!target) return;
+    const isLinked =
+      !!target.linkedAuth || household.members.includes(userId);
+    if (!isLinked) {
+      showToast('רק חשבונות מחוברים ניתן לנתק — לדייר מקומי השתמשו במחיקה');
+      return;
+    }
+    if (!household.members.includes(userId)) {
+      showToast('המשתמש אינו חבר בבית');
+      return;
+    }
+    if (household.members.length <= 1) {
+      showToast('לא ניתן לנתק את החבר האחרון בבית');
+      return;
+    }
+    if (
+      !confirm(
+        `לנתק את ${target.name} מהבית? הגישה תיחסם עד שיצטרף/תצטרף מחדש עם קוד הבית, והוא/היא יוסר/ו מכל סבבי המשימות.`
+      )
+    ) {
+      return;
+    }
+    try {
+      await removeUserFromChores(userId);
+      await deleteDoc(doc(db, 'households', householdId, 'users', userId));
+      await updateDoc(doc(db, 'households', householdId), {
+        members: household.members.filter(id => id !== userId)
+      });
+      await logAction('ניתוק דייר', `ניתק/ה את ${target.name} מהבית`);
+    } catch (err) {
+      console.error(err);
+      showToast('ניתוק הדייר נכשל');
+    }
   };
 
   const handleDeleteChore = async (choreId: string) => {
     if (!isAdmin || !householdId) return;
     const chore = chores.find(c => c.id === choreId);
-    await deleteDoc(doc(db, 'households', householdId, 'chores', choreId));
-    if (chore) logAction('מחיקת משימה', `מחק/ה את המשימה "${chore.name}"`);
+    if (!chore) return;
+    if (!confirm(`למחוק את המשימה "${chore.name}"?`)) return;
+    try {
+      await deleteDoc(doc(db, 'households', householdId, 'chores', choreId));
+      await logAction('מחיקת משימה', `מחק/ה את המשימה "${chore.name}"`);
+    } catch (err) {
+      console.error(err);
+      showToast('מחיקת המשימה נכשלה');
+    }
   };
 
   const handleEditChore = (chore: Chore) => {
@@ -517,16 +769,22 @@ export default function ChoresApp() {
     setNewChoreFreq(chore.frequency);
     setNewChoreCustomDays(chore.customDays || []);
     setNewChoreUsers(chore.rotation || []);
+    setNewChoreCategory(chore.category || '');
     setIsAddingChore(true);
   };
 
   const handleSaveChore = async () => {
     if (!isAdmin || !householdId || !newChoreName.trim() || newChoreUsers.length === 0) return;
+    if (newChoreFreq === 'custom_days' && newChoreCustomDays.length === 0) {
+      showToast('יש לבחור לפחות יום אחד למשימה עם ימים ספציפיים');
+      return;
+    }
     const cid = editingChoreId || `c${crypto.randomUUID().split('-')[0]}`;
     const choreData = {
       name: newChoreName.trim(),
       frequency: newChoreFreq,
       customDays: newChoreFreq === 'custom_days' ? newChoreCustomDays : null,
+      category: newChoreCategory || null,
       rotation: newChoreUsers,
       currentIndex: editingChoreId ? (chores.find(c => c.id === editingChoreId)?.currentIndex || 0) : 0,
       lastCompletedAt: editingChoreId ? (chores.find(c => c.id === editingChoreId)?.lastCompletedAt || null) : null
@@ -534,15 +792,21 @@ export default function ChoresApp() {
     
     // Clean up nulls for firestore strict rules if needed, though blueprint accepts them
     if (!choreData.customDays) delete (choreData as any).customDays;
+    if (!choreData.category) delete (choreData as any).category;
     
-    if (editingChoreId) {
-      await updateDoc(doc(db, 'households', householdId, 'chores', cid), choreData);
-      logAction('עריכת משימה', `ערך/ה את המשימה "${choreData.name}"`);
-    } else {
-      await setDoc(doc(db, 'households', householdId, 'chores', cid), choreData);
-      logAction('יצירת משימה', `יצר/ה משימה חדשה: "${choreData.name}"`);
+    try {
+      if (editingChoreId) {
+        await updateDoc(doc(db, 'households', householdId, 'chores', cid), choreData);
+        await logAction('עריכת משימה', `ערך/ה את המשימה "${choreData.name}"`);
+      } else {
+        await setDoc(doc(db, 'households', householdId, 'chores', cid), choreData);
+        await logAction('יצירת משימה', `יצר/ה משימה חדשה: "${choreData.name}"`);
+      }
+      cancelChoreForm();
+    } catch (err) {
+      console.error(err);
+      showToast('שמירת המשימה נכשלה');
     }
-    cancelChoreForm();
   };
 
   const cancelChoreForm = () => {
@@ -552,6 +816,7 @@ export default function ChoresApp() {
     setNewChoreFreq('daily');
     setNewChoreCustomDays([]);
     setNewChoreUsers([]);
+    setNewChoreCategory('');
   };
 
   const toggleCustomDay = (day: number) => {
@@ -574,9 +839,53 @@ export default function ChoresApp() {
     });
   };
 
+  const handleAvatarFileChange = async (file: File | null) => {
+    const targetUserId = avatarUploadTargetId;
+    if (!file || !householdId || !targetUserId) {
+      setAvatarUploadTargetId(null);
+      return;
+    }
+    const validationError = validateAvatarFile(file);
+    if (validationError) {
+      showToast(validationError);
+      setAvatarUploadTargetId(null);
+      return;
+    }
+    setAvatarUploading(true);
+    try {
+      const url = await uploadUserAvatar(householdId, targetUserId, file);
+      await updateDoc(doc(db, 'households', householdId, 'users', targetUserId), { photoURL: url });
+      showToast('התמונה עודכנה', 'success');
+    } catch (err) {
+      console.error(err);
+      showToast('העלאת התמונה נכשלה');
+    } finally {
+      setAvatarUploading(false);
+      setAvatarUploadTargetId(null);
+    }
+  };
+
   const currentUser = users.find(u => u.id === currentUserId);
   const pendingDoneChore = chores.find(c => c.id === pendingDoneChoreId);
   const pendingSkipChore = chores.find(c => c.id === pendingSkipChoreId);
+  const pendingSwapChore = chores.find(c => c.id === pendingSwapChoreId);
+  const swapCandidates = pendingSwapChore
+    ? (() => {
+        const activeIdx = getActiveAssigneeIndex(pendingSwapChore, users, pendingSwapChore.currentIndex);
+        const activeUserId = pendingSwapChore.rotation[activeIdx];
+        return pendingSwapChore.rotation
+          .filter(uid => uid !== activeUserId)
+          .map(uid => users.find(u => u.id === uid))
+          .filter((u): u is UserType => !!u && !u.isAbsent);
+      })()
+    : [];
+
+  // Simple gamification: tally completions from the visible activity log
+  // (last 50 entries) per resident, used for a lightweight leaderboard.
+  const leaderboard = users
+    .map(u => ({ user: u, count: logs.filter(l => l.userId === u.id && l.action === 'ביצוע משימה').length }))
+    .filter(entry => entry.count > 0)
+    .sort((a, b) => b.count - a.count);
 
   if (pickingProfile) {
     return (
@@ -624,6 +933,7 @@ export default function ChoresApp() {
   }
 
   const renderTasks = () => {
+    const isPastDay = normalizeDay(selectedDate).getTime() < normalizeDay(today).getTime();
     const activeTasks = chores.map(chore => {
       const occurrences = getOccurrencesBetween(chore, today, selectedDate);
       const activeIdx = getProjectedAssigneeIndex(chore, users, chore.currentIndex, occurrences);
@@ -638,16 +948,18 @@ export default function ChoresApp() {
         if (item.chore.id !== selectedChoreFilter) return false;
       }
 
+      if (selectedCategoryFilter !== 'all') {
+        if ((item.chore.category || 'אחר') !== selectedCategoryFilter) return false;
+      }
+
       const activeFilterId = selectedUserId === 'my_tasks' ? currentUserId : selectedUserId;
       if (activeFilterId !== 'all' && activeFilterId !== undefined) {
         if (item.activeUserId !== activeFilterId) return false;
       }
-      
-      // For selected day, check rules:
-      // custom_days: must match selectedDayIndex
-      if (item.chore.frequency === 'custom_days') {
-        if (!item.chore.customDays?.includes(selectedDayIndex)) return false;
-      }
+
+      // Only show the chore on days it's actually scheduled to occur
+      // (daily: every day, weekly: every 7th day from today, custom_days: matching weekday).
+      if (!choreOccursOnDate(item.chore, selectedDate, today)) return false;
       return true;
     });
 
@@ -728,6 +1040,27 @@ export default function ChoresApp() {
           </div>
         </div>
 
+        {/* Category Filter */}
+        {chores.some(c => c.category) && (
+          <div className="flex gap-2 overflow-x-auto pb-1 mb-2 no-scrollbar">
+            <button
+              onClick={() => setSelectedCategoryFilter('all')}
+              className={`flex-shrink-0 px-3 py-1.5 rounded-2xl text-xs font-medium transition-all border ${selectedCategoryFilter === 'all' ? 'bg-[#6B5E4C] text-white border-[#6B5E4C]' : 'bg-white text-[#8C7E6A] border-[#E6E0D4] hover:bg-[#F3EFE9]'}`}
+            >
+              כל התחומים
+            </button>
+            {CHORE_CATEGORIES.filter(cat => chores.some(c => (c.category || 'אחר') === cat)).map(cat => (
+              <button
+                key={cat}
+                onClick={() => setSelectedCategoryFilter(cat)}
+                className={`flex-shrink-0 px-3 py-1.5 rounded-2xl text-xs font-medium transition-all border ${selectedCategoryFilter === cat ? 'bg-[#6B5E4C] text-white border-[#6B5E4C]' : 'bg-white text-[#8C7E6A] border-[#E6E0D4] hover:bg-[#F3EFE9]'}`}
+              >
+                {cat}
+              </button>
+            ))}
+          </div>
+        )}
+
         <AnimatePresence mode="popLayout">
           {displayTasks.length === 0 ? (
             <motion.div 
@@ -753,11 +1086,19 @@ export default function ChoresApp() {
                 >
                   <div className="flex justify-between items-start mb-4">
                     <div>
-                      <h3 className={`text-lg font-bold ${done ? 'text-[#6B5E4C] line-through opacity-70' : 'text-[#3D3732]'}`}>
-                        {chore.name}
-                      </h3>
+                      <div className="flex items-center gap-2 flex-wrap">
+                        <h3 className={`text-lg font-bold ${done ? 'text-[#6B5E4C] line-through opacity-70' : 'text-[#3D3732]'}`}>
+                          {chore.name}
+                        </h3>
+                        {isPastDay && !done && (
+                          <span className="inline-flex items-center gap-1 text-[10px] font-bold text-rose-600 bg-rose-50 px-2 py-0.5 rounded-full">
+                            <AlertTriangle className="w-3 h-3" /> באיחור
+                          </span>
+                        )}
+                      </div>
                       <p className="text-xs text-[#A39788] mt-1">
                         {chore.frequency === 'daily' ? 'יומי' : chore.frequency === 'weekly' ? 'שבועי' : 'ימים ספציפיים'}
+                        {chore.category ? ` · ${chore.category}` : ''}
                       </p>
                     </div>
                     {assignee && (
@@ -817,7 +1158,7 @@ export default function ChoresApp() {
                       </button>
                     </div>
                   ) : (
-                    <div className="flex gap-3">
+                    <div className="flex gap-2">
                       <button
                         onClick={() => setPendingDoneChoreId(chore.id)}
                         className="flex-1 flex items-center justify-center gap-2 py-3.5 bg-[#A1C181] text-white rounded-2xl font-medium shadow-sm hover:bg-[#8eab72] active:scale-[0.98] transition-all"
@@ -827,11 +1168,20 @@ export default function ChoresApp() {
                       </button>
                       <button
                         onClick={() => setPendingSkipChoreId(chore.id)}
-                        className="flex items-center justify-center gap-2 px-6 border border-[#E6E0D4] text-[#8C7E6A] rounded-2xl font-medium hover:bg-[#F3EFE9] active:scale-[0.98] transition-all"
+                        className="flex items-center justify-center gap-2 px-4 border border-[#E6E0D4] text-[#8C7E6A] rounded-2xl font-medium hover:bg-[#F3EFE9] active:scale-[0.98] transition-all"
                       >
                         <FastForward className="w-5 h-5" />
                         דלג
                       </button>
+                      {chore.rotation && chore.rotation.length > 1 && (
+                        <button
+                          onClick={() => setPendingSwapChoreId(chore.id)}
+                          title="החלף תור"
+                          className="flex items-center justify-center px-3 border border-[#E6E0D4] text-[#8C7E6A] rounded-2xl font-medium hover:bg-[#F3EFE9] active:scale-[0.98] transition-all"
+                        >
+                          <Repeat className="w-5 h-5" />
+                        </button>
+                      )}
                     </div>
                   )}
                 </motion.div>
@@ -896,6 +1246,180 @@ export default function ChoresApp() {
     );
   };
 
+  // Rendered inline under the chore being edited, or at the end of the list
+  // when creating, so it is always clear which chore the fields belong to.
+  const renderChoreForm = (editingChore?: Chore) => (
+    <motion.div
+      initial={{ opacity: 0, y: -8 }}
+      animate={{ opacity: 1, y: 0 }}
+      className={`bg-white p-5 rounded-3xl border shadow-sm flex flex-col gap-4 ${
+        editingChore ? 'border-[#A1C181] ring-1 ring-[#A1C181]/40' : 'border-[#E6E0D4] mt-2'
+      }`}
+    >
+      <div className="flex items-center justify-between gap-2">
+        <h4 className="font-bold text-[#3D3732] truncate">
+          {editingChore ? `עריכת המשימה "${editingChore.name}"` : 'משימה חדשה'}
+        </h4>
+        <button
+          type="button"
+          onClick={cancelChoreForm}
+          title="ביטול"
+          className="p-1.5 text-[#8C7E6A] hover:bg-[#F3EFE9] rounded-lg transition-colors flex-shrink-0"
+        >
+          <X className="w-4 h-4" />
+        </button>
+      </div>
+
+      <div>
+        <label className="text-sm font-bold text-[#6B5E4C] block mb-1">שם המשימה</label>
+        <input 
+          type="text" 
+          value={newChoreName}
+          onChange={(e) => setNewChoreName(e.target.value)}
+          maxLength={100}
+          placeholder="לדוגמה: שאיבת אבק"
+          className="w-full bg-[#FAF9F6] border border-[#E6E0D4] rounded-xl px-4 py-2 text-[#3D3732] outline-none focus:border-[#A1C181] transition-colors"
+        />
+      </div>
+      
+      <div>
+        <label className="text-sm font-bold text-[#6B5E4C] block mb-2">תדירות</label>
+        <div className="flex gap-2">
+          <button 
+            onClick={() => setNewChoreFreq('daily')}
+            className={`flex-1 py-2 rounded-xl text-sm font-medium transition-colors border ${newChoreFreq === 'daily' ? 'bg-[#A1C181]/10 text-[#6B5E4C] border-[#A1C181]/30' : 'bg-[#FAF9F6] text-[#8C7E6A] border-[#E6E0D4]'}`}
+          >
+            יומי
+          </button>
+          <button 
+            onClick={() => setNewChoreFreq('weekly')}
+            className={`flex-1 py-2 rounded-xl text-sm font-medium transition-colors border ${newChoreFreq === 'weekly' ? 'bg-[#A1C181]/10 text-[#6B5E4C] border-[#A1C181]/30' : 'bg-[#FAF9F6] text-[#8C7E6A] border-[#E6E0D4]'}`}
+          >
+            שבועי
+          </button>
+          <button 
+            onClick={() => setNewChoreFreq('custom_days')}
+            className={`flex-1 py-2 rounded-xl text-sm font-medium transition-colors border ${newChoreFreq === 'custom_days' ? 'bg-[#A1C181]/10 text-[#6B5E4C] border-[#A1C181]/30' : 'bg-[#FAF9F6] text-[#8C7E6A] border-[#E6E0D4]'}`}
+          >
+            ימים ספציפיים
+          </button>
+        </div>
+      </div>
+
+      {newChoreFreq === 'custom_days' && (
+        <div>
+          <label className="text-sm font-bold text-[#6B5E4C] block mb-2">באיזה ימים?</label>
+          <div className="flex justify-between gap-1">
+            {['א׳', 'ב׳', 'ג׳', 'ד׳', 'ה׳', 'ו׳', 'ש׳'].map((dayName, idx) => {
+              const isSelected = newChoreCustomDays.includes(idx);
+              return (
+                <button
+                  key={idx}
+                  onClick={() => toggleCustomDay(idx)}
+                  className={`w-9 h-9 rounded-full text-sm font-bold transition-all ${isSelected ? 'bg-[#A1C181] text-white shadow-sm' : 'bg-[#FAF9F6] text-[#8C7E6A] border border-[#E6E0D4]'}`}
+                >
+                  {dayName}
+                </button>
+              );
+            })}
+          </div>
+        </div>
+      )}
+
+      <div>
+        <label className="text-sm font-bold text-[#6B5E4C] block mb-2">תחום (אופציונלי)</label>
+        <div className="flex gap-2 overflow-x-auto pb-1 no-scrollbar">
+          {CHORE_CATEGORIES.map(cat => (
+            <button
+              key={cat}
+              type="button"
+              onClick={() => setNewChoreCategory(prev => prev === cat ? '' : cat)}
+              className={`flex-shrink-0 px-3 py-1.5 rounded-full text-xs font-medium border transition-all ${newChoreCategory === cat ? 'bg-[#A1C181] text-white border-[#A1C181]' : 'bg-[#FAF9F6] text-[#8C7E6A] border-[#E6E0D4] hover:bg-[#F3EFE9]'}`}
+            >
+              {cat}
+            </button>
+          ))}
+        </div>
+      </div>
+
+      <div>
+        <label className="text-sm font-bold text-[#6B5E4C] block mb-2">משתתפים בסבב (לפי סדר התור)</label>
+        
+        {newChoreUsers.length > 0 && (
+          <div className="flex flex-col gap-2 mb-3 bg-[#FAF9F6] p-3 rounded-2xl border border-[#E6E0D4]">
+            {newChoreUsers.map((uId, index) => {
+              const u = users.find(x => x.id === uId);
+              if (!u) return null;
+              return (
+                <div key={uId} className="flex items-center justify-between bg-white p-2 rounded-xl border border-[#E6E0D4] shadow-sm">
+                  <div className="flex items-center gap-2">
+                    <div className={`w-8 h-8 rounded-full flex items-center justify-center text-white font-bold ${u.color}`}>
+                      {u.name.charAt(0)}
+                    </div>
+                    <span className="font-medium text-[#3D3732]">{u.name}</span>
+                  </div>
+                  <div className="flex gap-1" dir="ltr">
+                    <button 
+                      onClick={() => moveNewChoreUser(index, -1)}
+                      disabled={index === 0}
+                      className="p-1.5 text-[#8C7E6A] disabled:opacity-30 hover:bg-[#F3EFE9] rounded-lg transition-colors"
+                    >
+                      <ChevronUp className="w-4 h-4" />
+                    </button>
+                    <button 
+                      onClick={() => moveNewChoreUser(index, 1)}
+                      disabled={index === newChoreUsers.length - 1}
+                      className="p-1.5 text-[#8C7E6A] disabled:opacity-30 hover:bg-[#F3EFE9] rounded-lg transition-colors"
+                    >
+                      <ChevronDown className="w-4 h-4" />
+                    </button>
+                    <button 
+                      onClick={() => toggleNewChoreUser(u.id)}
+                      className="p-1.5 text-rose-400 hover:bg-rose-50 rounded-lg ml-1 transition-colors"
+                    >
+                      <X className="w-4 h-4" />
+                    </button>
+                  </div>
+                </div>
+              )
+            })}
+          </div>
+        )}
+
+        <div className="flex gap-2 overflow-x-auto pb-1 no-scrollbar">
+          {users.filter(u => !newChoreUsers.includes(u.id)).map(u => (
+              <button
+                key={u.id}
+                onClick={() => toggleNewChoreUser(u.id)}
+                className={`flex-shrink-0 flex items-center gap-2 px-3 py-1.5 rounded-full border border-[#E6E0D4] bg-white text-[#8C7E6A] hover:bg-[#F3EFE9] transition-all whitespace-nowrap`}
+              >
+                <Plus className="w-4 h-4" />
+                {u.name}
+              </button>
+            ))}
+          {users.filter(u => !newChoreUsers.includes(u.id)).length === 0 && (
+            <span className="text-xs text-[#8C7E6A] italic">כל דיירי הבית נבחרו.</span>
+          )}
+        </div>
+      </div>
+
+      <div className="flex gap-2 mt-2">
+        <button 
+          onClick={handleSaveChore}
+          className="flex-1 py-2.5 bg-[#A1C181] text-white rounded-xl font-bold shadow-sm hover:bg-[#8eab72] transition-colors"
+        >
+          {editingChore ? 'עדכן משימה' : 'שמור משימה'}
+        </button>
+        <button 
+          onClick={cancelChoreForm}
+          className="py-2.5 px-4 bg-[#F3EFE9] text-[#8C7E6A] rounded-xl font-medium hover:bg-[#EAE3D5] transition-colors"
+        >
+          ביטול
+        </button>
+      </div>
+    </motion.div>
+  );
+
   const renderSettings = () => {
     return (
       <div className="flex flex-col gap-8 pb-24">
@@ -904,13 +1428,32 @@ export default function ChoresApp() {
         <section className="bg-white p-5 rounded-3xl border border-[#E6E0D4] shadow-sm flex flex-col gap-4">
           <div className="flex items-center justify-between">
             <div className="flex items-center gap-4">
-              <Avatar
-                name={currentUser?.name || '?'}
-                color={currentUser?.color || 'bg-[#D4CBBF]'}
-                photoURL={resolvePhoto(currentUser)}
-                size="lg"
-                className="!w-12 !h-12 !text-lg"
-              />
+              <button
+                type="button"
+                onClick={() => {
+                  if (!currentUserId) return;
+                  setAvatarUploadTargetId(currentUserId);
+                  setAvatarUploadRequestId(id => id + 1);
+                }}
+                disabled={avatarUploading}
+                className="relative group"
+                title="שנה תמונה"
+              >
+                <Avatar
+                  name={currentUser?.name || '?'}
+                  color={currentUser?.color || 'bg-[#D4CBBF]'}
+                  photoURL={resolvePhoto(currentUser)}
+                  size="lg"
+                  className="!w-12 !h-12 !text-lg"
+                />
+                <span className="absolute -bottom-1 -left-1 w-5 h-5 rounded-full bg-[#3D5A80] text-white flex items-center justify-center shadow-sm border-2 border-white">
+                  {avatarUploading && avatarUploadTargetId === currentUserId ? (
+                    <Loader2 className="w-3 h-3 animate-spin" />
+                  ) : (
+                    <Camera className="w-3 h-3" />
+                  )}
+                </span>
+              </button>
               <div>
                 <h3 className="font-bold text-[#3D3732] flex items-center gap-2">
                   {currentUser?.name}
@@ -1003,7 +1546,7 @@ export default function ChoresApp() {
                       await renameHousehold(householdId, renameHomeName);
                       setRenameHomeName('');
                     } catch {
-                      alert('שינוי השם נכשל');
+                      showToast('שינוי השם נכשל');
                     } finally {
                       setHomeActionBusy(false);
                     }
@@ -1033,7 +1576,7 @@ export default function ChoresApp() {
                       setNewHomeName('');
                       setActiveTab('tasks');
                     } catch {
-                      alert('יצירת בית נכשלה');
+                      showToast('יצירת בית נכשלה');
                     } finally {
                       setHomeActionBusy(false);
                     }
@@ -1063,7 +1606,7 @@ export default function ChoresApp() {
                       setJoinCode('');
                       setActiveTab('tasks');
                     } catch {
-                      alert('קוד שגוי או תקלה בחיבור');
+                      showToast('קוד שגוי או תקלה בחיבור');
                     } finally {
                       setHomeActionBusy(false);
                     }
@@ -1076,9 +1619,37 @@ export default function ChoresApp() {
             </div>
           )}
           
+          {remindersSupported() && (
+            <div className="flex items-center justify-between pt-2 border-t border-[#E6E0D4]">
+              <div>
+                <p className="text-sm font-medium text-[#3D3732]">תזכורות בדפדפן</p>
+                <p className="text-xs text-[#8C7E6A]">קבל תזכורת כשהתור שלך היום ולא בוצע (בזמן שהאפליקציה פתוחה/מותקנת)</p>
+              </div>
+              <button
+                onClick={async () => {
+                  if (remindersOn) {
+                    disableReminders();
+                  } else {
+                    const ok = await enableReminders();
+                    if (!ok) showToast('לא ניתן להפעיל תזכורות — יש לאשר הרשאה בדפדפן');
+                  }
+                  setReminderBump(v => v + 1);
+                }}
+                className={`flex-shrink-0 flex items-center gap-2 px-3 py-2 rounded-2xl text-xs font-medium transition-colors border ${
+                  remindersOn
+                    ? 'bg-[#A1C181]/10 text-[#6B5E4C] border-[#A1C181]/30'
+                    : 'bg-[#F3EFE9] text-[#8C7E6A] border-[#E6E0D4]'
+                }`}
+              >
+                {remindersOn ? <BellRing className="w-4 h-4" /> : <BellOff className="w-4 h-4" />}
+                {remindersOn ? 'מופעל' : 'כבוי'}
+              </button>
+            </div>
+          )}
+
           <div className="flex items-center justify-between mt-2 pt-4 border-t border-[#E6E0D4]">
              <span className="text-xs text-[#8C7E6A]">מחובר כ- {user?.email}</span>
-             <button onClick={logout} className="text-xs font-bold text-rose-500 hover:underline flex items-center gap-1">
+             <button onClick={() => logout().catch(() => showToast('ההתנתקות נכשלה'))} className="text-xs font-bold text-rose-500 hover:underline flex items-center gap-1">
                <LogOut className="w-3 h-3"/> התנתק
              </button>
           </div>
@@ -1090,6 +1661,14 @@ export default function ChoresApp() {
             <h2 className="text-xl font-bold text-[#3D3732]">דיירי הבית</h2>
             {!isAdmin && (
               <p className="text-xs text-[#8C7E6A] mt-1">רק מנהל הבית יכול להוסיף או לערוך דיירים מקומיים</p>
+            )}
+            {users.length >= MEMBER_SOFT_LIMIT - 2 && (
+              <p className={`text-xs font-medium mt-1 flex items-center gap-1 ${users.length >= MEMBER_SOFT_LIMIT ? 'text-rose-600' : 'text-[#B99543]'}`}>
+                <AlertTriangle className="w-3 h-3" />
+                {users.length >= MEMBER_SOFT_LIMIT
+                  ? `הגעתם למגבלת ${MEMBER_SOFT_LIMIT} דיירים בבית`
+                  : `מתקרבים למגבלת הדיירים (${users.length}/${MEMBER_SOFT_LIMIT})`}
+              </p>
             )}
           </div>
           <div className="bg-white border border-[#E6E0D4] rounded-3xl shadow-sm divide-y divide-[#E6E0D4] overflow-hidden">
@@ -1111,16 +1690,45 @@ export default function ChoresApp() {
                 );
               }
               const canToggleAbsent = isAdmin || u.id === user?.uid;
+              const canUploadAvatar = isAdmin || u.id === user?.uid;
               return (
                 <div key={u.id} className="flex items-center justify-between p-4">
                   <div className="flex items-center gap-3">
-                    <Avatar
-                      name={u.name}
-                      color={u.color}
-                      photoURL={resolvePhoto(u)}
-                      size="md"
-                      className={u.isAbsent ? 'opacity-40 grayscale' : ''}
-                    />
+                    {canUploadAvatar ? (
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setAvatarUploadTargetId(u.id);
+                          setAvatarUploadRequestId(id => id + 1);
+                        }}
+                        disabled={avatarUploading}
+                        className="relative"
+                        title="שנה תמונה"
+                      >
+                        <Avatar
+                          name={u.name}
+                          color={u.color}
+                          photoURL={resolvePhoto(u)}
+                          size="md"
+                          className={u.isAbsent ? 'opacity-40 grayscale' : ''}
+                        />
+                        <span className="absolute -bottom-1 -left-1 w-4 h-4 rounded-full bg-[#3D5A80] text-white flex items-center justify-center shadow-sm border-2 border-white">
+                          {avatarUploading && avatarUploadTargetId === u.id ? (
+                            <Loader2 className="w-2.5 h-2.5 animate-spin" />
+                          ) : (
+                            <Camera className="w-2.5 h-2.5" />
+                          )}
+                        </span>
+                      </button>
+                    ) : (
+                      <Avatar
+                        name={u.name}
+                        color={u.color}
+                        photoURL={resolvePhoto(u)}
+                        size="md"
+                        className={u.isAbsent ? 'opacity-40 grayscale' : ''}
+                      />
+                    )}
                     <div>
                       <span className={`font-medium ${u.isAbsent ? 'text-[#A39788] line-through' : 'text-[#4A443F]'}`}>
                         {u.name}
@@ -1155,6 +1763,19 @@ export default function ChoresApp() {
                         </button>
                       </>
                     )}
+                    {isAdmin &&
+                      u.id !== user?.uid &&
+                      (u.linkedAuth || household?.members.includes(u.id)) && (
+                      <button
+                        type="button"
+                        onClick={() => handleDisconnectMember(u.id)}
+                        title="נתק מהבית"
+                        className="flex items-center gap-1.5 px-3 py-2 text-xs font-medium text-rose-500 hover:bg-rose-50 rounded-2xl transition-colors border border-rose-100"
+                      >
+                        <UserMinus className="w-4 h-4" />
+                        נתק
+                      </button>
+                    )}
                   </div>
                 </div>
               );
@@ -1181,7 +1802,8 @@ export default function ChoresApp() {
             ) : (
               <button 
                 onClick={() => setIsAddingUser(true)}
-                className="w-full p-4 flex items-center justify-center gap-2 text-[#8C7E6A] hover:bg-[#F3EFE9] transition-colors"
+                disabled={users.length >= MEMBER_SOFT_LIMIT}
+                className="w-full p-4 flex items-center justify-center gap-2 text-[#8C7E6A] hover:bg-[#F3EFE9] transition-colors disabled:opacity-40 disabled:hover:bg-transparent"
               >
                 <Plus className="w-4 h-4" />
                 <span className="font-medium text-sm">הוסף דייר מקומי</span>
@@ -1190,6 +1812,33 @@ export default function ChoresApp() {
           </div>
         </section>
 
+        {/* Leaderboard */}
+        {leaderboard.length > 0 && (
+          <section>
+            <div className="mb-4">
+              <h2 className="text-xl font-bold text-[#3D3732] flex items-center gap-2">
+                <Trophy className="w-5 h-5 text-[#B99543]" />
+                מובילי הביצועים
+              </h2>
+              <p className="text-xs text-[#8C7E6A] mt-1">לפי הפעילות האחרונה (עד 50 רשומות)</p>
+            </div>
+            <div className="bg-white border border-[#E6E0D4] rounded-3xl shadow-sm divide-y divide-[#E6E0D4] overflow-hidden">
+              {leaderboard.map(({ user: u, count }, idx) => (
+                <div key={u.id} className="flex items-center justify-between p-4">
+                  <div className="flex items-center gap-3">
+                    <span className="w-6 text-center font-extrabold text-[#A39788]">
+                      {idx === 0 ? '🥇' : idx === 1 ? '🥈' : idx === 2 ? '🥉' : idx + 1}
+                    </span>
+                    <Avatar name={u.name} color={u.color} photoURL={resolvePhoto(u)} size="sm" />
+                    <span className="font-medium text-[#4A443F]">{u.id === currentUserId ? 'אני' : u.name}</span>
+                  </div>
+                  <span className="text-sm font-bold text-[#6B5E4C]">{count} משימות</span>
+                </div>
+              ))}
+            </div>
+          </section>
+        )}
+
         {/* Task Management — admin only */}
         {isAdmin && (
         <section>
@@ -1197,25 +1846,52 @@ export default function ChoresApp() {
             <h2 className="text-xl font-bold text-[#3D3732]">ניהול משימות</h2>
           </div>
           <div className="flex flex-col gap-3">
-            {chores.map(chore => (
-              <div key={chore.id} className="bg-white p-4 rounded-2xl border border-[#E6E0D4] shadow-sm flex items-center justify-between">
+            {chores.map(chore => {
+              const health = getChoreHealth(chore, today);
+              const isEditingThis = editingChoreId === chore.id;
+              return (
+              <div key={chore.id} className="flex flex-col gap-2">
+              <div className={`bg-white p-4 rounded-2xl border shadow-sm flex items-center justify-between transition-colors ${
+                isEditingThis ? 'border-[#A1C181] ring-1 ring-[#A1C181]/40' : 'border-[#E6E0D4]'
+              }`}>
                 <div>
                   <h4 className="font-bold text-[#3D3732]">{chore.name}</h4>
-                  <div className="flex gap-2 mt-1">
+                  <div className="flex gap-2 mt-1 flex-wrap">
                     <span className="text-xs px-2 py-0.5 bg-[#F5F1EA] text-[#A39788] rounded">
                       {chore.frequency === 'daily' ? 'יומי' : chore.frequency === 'weekly' ? 'שבועי' : 'ימים ספציפיים'}
                     </span>
+                    {chore.category && (
+                      <span className="text-xs px-2 py-0.5 bg-[#F5F1EA] text-[#A39788] rounded">{chore.category}</span>
+                    )}
                     <span className="text-xs text-[#8C7E6A] flex items-center leading-relaxed">
                       {(chore.rotation || []).map(id => users.find(u => u.id === id)?.name).filter(Boolean).join(', ')}
                     </span>
                   </div>
+                  <p className={`text-[11px] mt-1 font-medium ${
+                    health.daysSince === null
+                      ? 'text-[#A39788]'
+                      : health.overdueBy !== null && health.overdueBy > health.expected
+                      ? 'text-rose-600'
+                      : health.overdueBy !== null && health.overdueBy > 0
+                      ? 'text-[#B99543]'
+                      : 'text-[#81B29A]'
+                  }`}>
+                    {health.daysSince === null
+                      ? 'עדיין לא בוצעה'
+                      : health.daysSince === 0
+                      ? 'בוצעה היום'
+                      : `בוצעה לפני ${health.daysSince} ימים${health.overdueBy && health.overdueBy > 0 ? ` · ${health.overdueBy} ימים באיחור` : ''}`}
+                  </p>
                 </div>
                 <div className="flex gap-1">
                   <button 
-                    onClick={() => handleEditChore(chore)}
-                    className="p-2 text-[#8C7E6A] hover:bg-[#F3EFE9] rounded-xl transition-colors"
+                    onClick={() => (isEditingThis ? cancelChoreForm() : handleEditChore(chore))}
+                    title={isEditingThis ? 'סגור עריכה' : 'ערוך משימה'}
+                    className={`p-2 rounded-xl transition-colors ${
+                      isEditingThis ? 'text-[#6B5E4C] bg-[#A1C181]/15' : 'text-[#8C7E6A] hover:bg-[#F3EFE9]'
+                    }`}
                   >
-                    <Pencil className="w-5 h-5" />
+                    {isEditingThis ? <X className="w-5 h-5" /> : <Pencil className="w-5 h-5" />}
                   </button>
                   <button 
                     onClick={() => handleDeleteChore(chore.id)}
@@ -1225,146 +1901,14 @@ export default function ChoresApp() {
                   </button>
                 </div>
               </div>
-            ))}
+              {isEditingThis && renderChoreForm(chore)}
+              </div>
+              );
+            })}
 
-            {isAddingChore ? (
-              <motion.div 
-                initial={{ opacity: 0, y: -10 }} animate={{ opacity: 1, y: 0 }}
-                className="bg-white p-5 rounded-3xl border border-[#E6E0D4] shadow-sm mt-2 flex flex-col gap-4"
-              >
-                <div>
-                  <label className="text-sm font-bold text-[#6B5E4C] block mb-1">שם המשימה</label>
-                  <input 
-                    type="text" 
-                    value={newChoreName}
-                    onChange={(e) => setNewChoreName(e.target.value)}
-                    maxLength={100}
-                    placeholder="לדוגמה: שאיבת אבק"
-                    className="w-full bg-[#FAF9F6] border border-[#E6E0D4] rounded-xl px-4 py-2 text-[#3D3732] outline-none focus:border-[#A1C181] transition-colors"
-                  />
-                </div>
-                
-                <div>
-                  <label className="text-sm font-bold text-[#6B5E4C] block mb-2">תדירות</label>
-                  <div className="flex gap-2">
-                    <button 
-                      onClick={() => setNewChoreFreq('daily')}
-                      className={`flex-1 py-2 rounded-xl text-sm font-medium transition-colors border ${newChoreFreq === 'daily' ? 'bg-[#A1C181]/10 text-[#6B5E4C] border-[#A1C181]/30' : 'bg-[#FAF9F6] text-[#8C7E6A] border-[#E6E0D4]'}`}
-                    >
-                      יומי
-                    </button>
-                    <button 
-                      onClick={() => setNewChoreFreq('weekly')}
-                      className={`flex-1 py-2 rounded-xl text-sm font-medium transition-colors border ${newChoreFreq === 'weekly' ? 'bg-[#A1C181]/10 text-[#6B5E4C] border-[#A1C181]/30' : 'bg-[#FAF9F6] text-[#8C7E6A] border-[#E6E0D4]'}`}
-                    >
-                      שבועי
-                    </button>
-                    <button 
-                      onClick={() => setNewChoreFreq('custom_days')}
-                      className={`flex-1 py-2 rounded-xl text-sm font-medium transition-colors border ${newChoreFreq === 'custom_days' ? 'bg-[#A1C181]/10 text-[#6B5E4C] border-[#A1C181]/30' : 'bg-[#FAF9F6] text-[#8C7E6A] border-[#E6E0D4]'}`}
-                    >
-                      ימים ספציפיים
-                    </button>
-                  </div>
-                </div>
-
-                {newChoreFreq === 'custom_days' && (
-                  <div>
-                    <label className="text-sm font-bold text-[#6B5E4C] block mb-2">באיזה ימים?</label>
-                    <div className="flex justify-between gap-1">
-                      {['א׳', 'ב׳', 'ג׳', 'ד׳', 'ה׳', 'ו׳', 'ש׳'].map((dayName, idx) => {
-                        const isSelected = newChoreCustomDays.includes(idx);
-                        return (
-                          <button
-                            key={idx}
-                            onClick={() => toggleCustomDay(idx)}
-                            className={`w-9 h-9 rounded-full text-sm font-bold transition-all ${isSelected ? 'bg-[#A1C181] text-white shadow-sm' : 'bg-[#FAF9F6] text-[#8C7E6A] border border-[#E6E0D4]'}`}
-                          >
-                            {dayName}
-                          </button>
-                        );
-                      })}
-                    </div>
-                  </div>
-                )}
-
-                <div>
-                  <label className="text-sm font-bold text-[#6B5E4C] block mb-2">משתתפים בסבב (לפי סדר התור)</label>
-                  
-                  {newChoreUsers.length > 0 && (
-                    <div className="flex flex-col gap-2 mb-3 bg-[#FAF9F6] p-3 rounded-2xl border border-[#E6E0D4]">
-                      {newChoreUsers.map((uId, index) => {
-                        const u = users.find(x => x.id === uId);
-                        if (!u) return null;
-                        return (
-                          <div key={uId} className="flex items-center justify-between bg-white p-2 rounded-xl border border-[#E6E0D4] shadow-sm">
-                            <div className="flex items-center gap-2">
-                              <div className={`w-8 h-8 rounded-full flex items-center justify-center text-white font-bold ${u.color}`}>
-                                {u.name.charAt(0)}
-                              </div>
-                              <span className="font-medium text-[#3D3732]">{u.name}</span>
-                            </div>
-                            <div className="flex gap-1" dir="ltr">
-                              <button 
-                                onClick={() => moveNewChoreUser(index, -1)}
-                                disabled={index === 0}
-                                className="p-1.5 text-[#8C7E6A] disabled:opacity-30 hover:bg-[#F3EFE9] rounded-lg transition-colors"
-                              >
-                                <ChevronUp className="w-4 h-4" />
-                              </button>
-                              <button 
-                                onClick={() => moveNewChoreUser(index, 1)}
-                                disabled={index === newChoreUsers.length - 1}
-                                className="p-1.5 text-[#8C7E6A] disabled:opacity-30 hover:bg-[#F3EFE9] rounded-lg transition-colors"
-                              >
-                                <ChevronDown className="w-4 h-4" />
-                              </button>
-                              <button 
-                                onClick={() => toggleNewChoreUser(u.id)}
-                                className="p-1.5 text-rose-400 hover:bg-rose-50 rounded-lg ml-1 transition-colors"
-                              >
-                                <X className="w-4 h-4" />
-                              </button>
-                            </div>
-                          </div>
-                        )
-                      })}
-                    </div>
-                  )}
-
-                  <div className="flex gap-2 overflow-x-auto pb-1 no-scrollbar">
-                    {users.filter(u => !newChoreUsers.includes(u.id)).map(u => (
-                        <button
-                          key={u.id}
-                          onClick={() => toggleNewChoreUser(u.id)}
-                          className={`flex-shrink-0 flex items-center gap-2 px-3 py-1.5 rounded-full border border-[#E6E0D4] bg-white text-[#8C7E6A] hover:bg-[#F3EFE9] transition-all whitespace-nowrap`}
-                        >
-                          <Plus className="w-4 h-4" />
-                          {u.name}
-                        </button>
-                      ))}
-                    {users.filter(u => !newChoreUsers.includes(u.id)).length === 0 && (
-                      <span className="text-xs text-[#8C7E6A] italic">כל דיירי הבית נבחרו.</span>
-                    )}
-                  </div>
-                </div>
-
-                <div className="flex gap-2 mt-2">
-                  <button 
-                    onClick={handleSaveChore}
-                    className="flex-1 py-2.5 bg-[#A1C181] text-white rounded-xl font-bold shadow-sm hover:bg-[#8eab72] transition-colors"
-                  >
-                    {editingChoreId ? 'עדכן משימה' : 'שמור משימה'}
-                  </button>
-                  <button 
-                    onClick={cancelChoreForm}
-                    className="py-2.5 px-4 bg-[#F3EFE9] text-[#8C7E6A] rounded-xl font-medium hover:bg-[#EAE3D5] transition-colors"
-                  >
-                    ביטול
-                  </button>
-                </div>
-              </motion.div>
-            ) : (
+            {isAddingChore && !editingChoreId ? (
+              renderChoreForm()
+            ) : !isAddingChore ? (
               <button 
                 onClick={() => setIsAddingChore(true)}
                 className="bg-[#F3EFE9] p-4 rounded-3xl border border-dashed border-[#DED8CE] flex flex-col items-center justify-center mt-2 hover:bg-[#EAE3D5] transition-colors gap-2"
@@ -1372,7 +1916,7 @@ export default function ChoresApp() {
                 <Plus className="w-6 h-6 text-[#8C7E6A]" />
                 <span className="font-medium text-[#8C7E6A]">הוספת משימה חדשה</span>
               </button>
-            )}
+            ) : null}
           </div>
         </section>
         )}
@@ -1406,6 +1950,26 @@ export default function ChoresApp() {
           onCancel={() => !actionBusy && setPendingSkipChoreId(null)}
         />
       )}
+      {pendingSwapChore && (
+        <SwapTurnModal
+          choreName={pendingSwapChore.name}
+          candidates={swapCandidates}
+          busy={actionBusy}
+          onConfirm={(targetUserId) => completeSwap(pendingSwapChore.id, targetUserId)}
+          onCancel={() => !actionBusy && setPendingSwapChoreId(null)}
+        />
+      )}
+      <input
+        ref={avatarInputRef}
+        type="file"
+        accept="image/*"
+        className="hidden"
+        onChange={(e) => {
+          const f = e.target.files?.[0] || null;
+          e.target.value = '';
+          handleAvatarFileChange(f);
+        }}
+      />
       <header className="sticky top-0 z-10 bg-[#FAF9F6]/80 backdrop-blur-xl border-b border-[#E6E0D4] px-6 py-4 flex flex-col items-center gap-2">
         <h1 className="text-2xl font-extrabold text-[#3D3732] text-center tracking-tight">תורנויות הבית</h1>
         <p className="text-[10px] text-[#A39788] font-medium uppercase tracking-wider">פותח על ידי דניאל כהן</p>

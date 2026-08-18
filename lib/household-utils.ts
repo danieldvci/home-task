@@ -39,12 +39,16 @@ export function activeHouseholdStorageKey(authUid: string): string {
   return `chores_active_household_${authUid}`;
 }
 
-/** Merge Google photo into an existing linked profile without clobbering edited name/color. */
+/**
+ * Fill Google photo only when the profile has none.
+ * Never overwrite an existing URL — custom avatar uploads must survive reload
+ * (ensureLoginProfile runs on every household open).
+ */
 export function mergeAuthPhoto(
   existing: { photoURL?: string; linkedAuth?: boolean },
   authPhotoURL: string | null | undefined
 ): { photoURL?: string } | null {
   if (!authPhotoURL) return null;
-  if (existing.photoURL === authPhotoURL) return null;
+  if (existing.photoURL) return null;
   return { photoURL: authPhotoURL };
 }

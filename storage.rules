@@ -11,10 +11,26 @@ service firebase.storage {
         && request.auth.uid in firestore.get(/databases/(default)/documents/households/$(householdId)).data.members;
     }
 
+    function isOwnerOfHousehold(householdId) {
+      return isSignedIn()
+        && firestore.exists(/databases/(default)/documents/households/$(householdId))
+        && request.auth.uid == firestore.get(/databases/(default)/documents/households/$(householdId)).data.ownerId;
+    }
+
     match /households/{householdId}/proofs/{fileName} {
       allow read: if isMember(householdId);
       allow write: if isMember(householdId)
         && request.resource.size < 3 * 1024 * 1024
+        && request.resource.contentType.matches('image/jpeg');
+    }
+
+    // Custom profile-photo uploads. A member may set their own avatar; the
+    // household owner may set an avatar for local (non-Google) residents too.
+    match /households/{householdId}/avatars/{userId} {
+      allow read: if isMember(householdId);
+      allow write: if isMember(householdId)
+        && (request.auth.uid == userId || isOwnerOfHousehold(householdId))
+        && request.resource.size < 2 * 1024 * 1024
         && request.resource.contentType.matches('image/jpeg');
     }
   }

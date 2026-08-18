@@ -99,6 +99,7 @@ export function useAuth() {
       await signInWithPopup(auth, provider);
     } catch (error) {
       console.error('Login error:', error);
+      throw error;
     }
   };
 
@@ -107,6 +108,7 @@ export function useAuth() {
       await signOut(auth);
     } catch (error) {
       console.error('Logout error:', error);
+      throw error;
     }
   };
 
