@@ -503,32 +503,44 @@ export default function ChoresApp() {
       const logId = `l${crypto.randomUUID().split('-')[0]}`;
       const activeIdx = getActiveAssigneeIndex(chore, users, chore.currentIndex);
       const nextIdx = getNextActiveIndex(chore, users, activeIdx);
+      const choreRef = doc(db, 'households', householdId, 'chores', choreId);
       const logRef = doc(db, 'households', householdId, 'logs', logId);
-
-      const batch = writeBatch(db);
-      batch.update(doc(db, 'households', householdId, 'chores', choreId), {
+      const choreUpdate = {
         lastCompletedAt: selectedDate.toISOString(),
         currentIndex: nextIdx
-      });
-      batch.set(logRef, {
+      };
+      const logPayload: Record<string, string> = {
         userId: currentUserId!,
         action: 'ביצוע משימה',
         details: `סיים/ה את משימת "${chore.name}"`,
         timestamp: new Date().toISOString()
-      });
-      await batch.commit();
-      setPendingDoneChoreId(null);
+      };
 
-      // Upload the proof photo in the background so completion feels instant,
-      // then patch the log with the resulting URL.
-      if (photoBlob) {
-        uploadTaskProof(householdId, logId, photoBlob)
-          .then((photoUrl) => updateDoc(logRef, { photoUrl }))
-          .catch((err) => {
+      if (!photoBlob) {
+        const batch = writeBatch(db);
+        batch.update(choreRef, choreUpdate);
+        batch.set(logRef, logPayload);
+        await batch.commit();
+        setPendingDoneChoreId(null);
+        return;
+      }
+
+      // Mark the chore done right away, then upload in the background. Logs are
+      // append-only in the security rules, so photoUrl has to be part of the
+      // initial write rather than patched in afterwards.
+      await updateDoc(choreRef, choreUpdate);
+      setPendingDoneChoreId(null);
+      uploadTaskProof(householdId, logId, photoBlob)
+        .then(
+          (photoUrl) => ({ ...logPayload, photoUrl }),
+          (err) => {
             console.error(err);
             showToast('המשימה נשמרה, אך העלאת התמונה נכשלה');
-          });
-      }
+            return logPayload;
+          }
+        )
+        .then((payload) => setDoc(logRef, payload))
+        .catch(console.error);
     } catch (err) {
       console.error(err);
       showToast('שמירת הביצוע נכשלה');
