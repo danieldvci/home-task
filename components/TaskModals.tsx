@@ -1,7 +1,7 @@
 'use client';
 
 import React, { useEffect, useRef, useState } from 'react';
-import { Camera, CheckCircle2, X, ImagePlus, Repeat, Loader2 } from 'lucide-react';
+import { Camera, CheckCircle2, X, ImagePlus, Repeat, Loader2, Trash2 } from 'lucide-react';
 import { motion } from 'motion/react';
 import { Avatar } from './Avatar';
 import { compressImage } from '../lib/image';
@@ -275,6 +275,86 @@ export function SwapTurnModal({ choreName, candidates, busy, onConfirm, onCancel
             disabled={busy}
             onClick={onCancel}
             className="px-5 py-3 bg-[#F3EFE9] text-[#8C7E6A] rounded-2xl font-medium"
+          >
+            ביטול
+          </button>
+        </div>
+      </motion.div>
+    </div>
+  );
+}
+
+type DeleteLogProps = {
+  details: string;
+  olderCountHint?: number;
+  busy?: boolean;
+  onDeleteOne: () => void;
+  onDeleteOlder: () => void;
+  onCancel: () => void;
+};
+
+export function DeleteLogConfirmModal({
+  details,
+  olderCountHint,
+  busy,
+  onDeleteOne,
+  onDeleteOlder,
+  onCancel
+}: DeleteLogProps) {
+  return (
+    <div className="fixed inset-0 z-50 flex items-end sm:items-center justify-center bg-black/40 p-4">
+      <motion.div
+        initial={{ opacity: 0, y: 24 }}
+        animate={{ opacity: 1, y: 0 }}
+        className="w-full max-w-md bg-white rounded-3xl border border-[#E6E0D4] shadow-xl p-5 flex flex-col gap-4"
+      >
+        <div className="flex items-start justify-between gap-3">
+          <div>
+            <h3 className="text-lg font-extrabold text-[#3D3732]">מחיקת רשומת פעילות</h3>
+            <p className="text-sm text-[#8C7E6A] mt-1 line-clamp-2">{details}</p>
+          </div>
+          <button
+            type="button"
+            onClick={onCancel}
+            disabled={busy}
+            className="p-2 text-[#8C7E6A] hover:bg-[#F5F1EA] rounded-full"
+          >
+            <X className="w-5 h-5" />
+          </button>
+        </div>
+
+        <p className="text-sm text-[#6B5E4C]">
+          אפשר למחוק רק את הרשומה הזו, או גם את כל הרשומות הישנות ממנה (כולל אותה).
+        </p>
+
+        <div className="flex flex-col gap-2">
+          <button
+            type="button"
+            disabled={busy}
+            onClick={onDeleteOne}
+            className="w-full flex items-center justify-center gap-2 py-3 bg-rose-500 text-white rounded-2xl font-bold disabled:opacity-40 hover:bg-rose-600 transition-colors"
+          >
+            <Trash2 className="w-4 h-4" />
+            {busy ? 'מוחק...' : 'מחק רק רשומה זו'}
+          </button>
+          <button
+            type="button"
+            disabled={busy}
+            onClick={onDeleteOlder}
+            className="w-full flex items-center justify-center gap-2 py-3 border border-rose-200 text-rose-600 bg-rose-50 rounded-2xl font-bold disabled:opacity-40 hover:bg-rose-100 transition-colors"
+          >
+            <Trash2 className="w-4 h-4" />
+            {busy
+              ? 'מוחק...'
+              : olderCountHint && olderCountHint > 1
+              ? `מחק רשומה זו ואת כל הישנות (${olderCountHint})`
+              : 'מחק רשומה זו ואת כל הישנות'}
+          </button>
+          <button
+            type="button"
+            disabled={busy}
+            onClick={onCancel}
+            className="w-full py-3 bg-[#F3EFE9] text-[#8C7E6A] rounded-2xl font-medium"
           >
             ביטול
           </button>

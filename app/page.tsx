@@ -32,13 +32,13 @@ import type { LucideIcon } from 'lucide-react';
 import { motion, AnimatePresence } from 'motion/react';
 import { useAuth, useHousehold } from '../lib/hooks';
 import { db } from '../lib/firebase';
-import { collection, doc, onSnapshot, setDoc, deleteDoc, updateDoc, query, orderBy, limit, writeBatch } from 'firebase/firestore';
+import { collection, doc, onSnapshot, setDoc, deleteDoc, updateDoc, query, orderBy, limit, writeBatch, getDocs, where } from 'firebase/firestore';
 import { uploadTaskProof, uploadUserAvatar, validateAvatarFile } from '../lib/storage-upload';
 import { Avatar } from '../components/Avatar';
 import { ReactionBar } from '../components/Reactions';
 import { COMMENTS_MAX, COMMENT_MAX_LENGTH } from '../lib/reactions';
 import type { LogComment, ReactionId } from '../lib/reactions';
-import { DoneConfirmModal, SkipConfirmModal, SwapTurnModal } from '../components/TaskModals';
+import { DoneConfirmModal, SkipConfirmModal, SwapTurnModal, DeleteLogConfirmModal } from '../components/TaskModals';
 import { householdDisplayName, profileStorageKey } from '../lib/household-utils';
 import { describeChoreChanges, frequencyLabel, joinDetails, clampDetails } from '../lib/activity';
 import { useToast } from '../components/Toast';
@@ -299,6 +299,7 @@ export default function ChoresApp() {
   const [pendingDoneChoreId, setPendingDoneChoreId] = useState<string | null>(null);
   const [pendingSkipChoreId, setPendingSkipChoreId] = useState<string | null>(null);
   const [pendingSwapChoreId, setPendingSwapChoreId] = useState<string | null>(null);
+  const [pendingDeleteLogId, setPendingDeleteLogId] = useState<string | null>(null);
   const [actionBusy, setActionBusy] = useState(false);
   const [pickingProfile, setPickingProfile] = useState(false);
   const [newHomeName, setNewHomeName] = useState('');
@@ -520,12 +521,45 @@ export default function ChoresApp() {
 
   const handleDeleteLog = async (logId: string) => {
     if (!householdId || !isAdmin) return;
-    if (!confirm('למחוק רשומת פעילות זו?')) return;
+    setActionBusy(true);
     try {
       await deleteDoc(doc(db, 'households', householdId, 'logs', logId));
+      setPendingDeleteLogId(null);
     } catch (err) {
       console.error(err);
       showToast('מחיקת הרשומה נכשלה');
+    } finally {
+      setActionBusy(false);
+    }
+  };
+
+  // Deletes the chosen entry and every log at or before its timestamp,
+  // including entries outside the 50-item history window currently loaded.
+  const handleDeleteLogAndOlder = async (log: LogType) => {
+    if (!householdId || !isAdmin) return;
+    setActionBusy(true);
+    try {
+      const olderQuery = query(
+        collection(db, 'households', householdId, 'logs'),
+        where('timestamp', '<=', log.timestamp)
+      );
+      const snap = await getDocs(olderQuery);
+      const docs = snap.docs;
+      // Firestore batches max out at 500 writes.
+      for (let i = 0; i < docs.length; i += 500) {
+        const batch = writeBatch(db);
+        docs.slice(i, i + 500).forEach((d) => batch.delete(d.ref));
+        await batch.commit();
+      }
+      setPendingDeleteLogId(null);
+      if (docs.length > 1) {
+        showToast(`נמחקו ${docs.length} רשומות`);
+      }
+    } catch (err) {
+      console.error(err);
+      showToast('מחיקת הרשומות נכשלה');
+    } finally {
+      setActionBusy(false);
     }
   };
 
@@ -1042,6 +1076,10 @@ export default function ChoresApp() {
   const pendingDoneChore = chores.find(c => c.id === pendingDoneChoreId);
   const pendingSkipChore = chores.find(c => c.id === pendingSkipChoreId);
   const pendingSwapChore = chores.find(c => c.id === pendingSwapChoreId);
+  const pendingDeleteLog = logs.find(l => l.id === pendingDeleteLogId);
+  const pendingDeleteOlderHint = pendingDeleteLog
+    ? logs.filter(l => l.timestamp <= pendingDeleteLog.timestamp).length
+    : 0;
   const swapCandidates = pendingSwapChore
     ? (() => {
         const activeIdx = getActiveAssigneeIndex(pendingSwapChore, users, pendingSwapChore.currentIndex);
@@ -1443,7 +1481,7 @@ export default function ChoresApp() {
                               <span className="text-xs font-medium text-[#A39788] whitespace-nowrap">{timeStr}</span>
                               {isAdmin && (
                                 <button
-                                  onClick={() => handleDeleteLog(log.id)}
+                                  onClick={() => setPendingDeleteLogId(log.id)}
                                   title="מחק רשומה"
                                   className="p-1 text-rose-400 hover:bg-rose-50 rounded-lg transition-colors"
                                 >
@@ -2192,6 +2230,16 @@ export default function ChoresApp() {
           busy={actionBusy}
           onConfirm={(targetUserId) => completeSwap(pendingSwapChore.id, targetUserId)}
           onCancel={() => !actionBusy && setPendingSwapChoreId(null)}
+        />
+      )}
+      {pendingDeleteLog && (
+        <DeleteLogConfirmModal
+          details={pendingDeleteLog.details}
+          olderCountHint={pendingDeleteOlderHint}
+          busy={actionBusy}
+          onDeleteOne={() => handleDeleteLog(pendingDeleteLog.id)}
+          onDeleteOlder={() => handleDeleteLogAndOlder(pendingDeleteLog)}
+          onCancel={() => !actionBusy && setPendingDeleteLogId(null)}
         />
       )}
       <input
