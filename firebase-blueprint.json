@@ -34,7 +34,8 @@
         "category": { "type": "string", "maxLength": 40 },
         "rotation": { "type": "array", "maxLength": 20 },
         "currentIndex": { "type": "number" },
-        "lastCompletedAt": { "type": "string", "maxLength": 40 }
+        "lastCompletedAt": { "type": "string", "maxLength": 40 },
+        "lastCompletedLogId": { "type": "string", "maxLength": 128 }
       },
       "required": ["name", "frequency", "rotation", "currentIndex"]
     },
@@ -47,7 +48,9 @@
         "action": { "type": "string", "maxLength": 100 },
         "details": { "type": "string", "maxLength": 200 },
         "timestamp": { "type": "string", "maxLength": 40 },
-        "photoUrl": { "type": "string", "maxLength": 2000 }
+        "photoUrl": { "type": "string", "maxLength": 2000 },
+        "reactions": { "type": "object", "description": "authUid -> like | love | laugh | wow | dislike" },
+        "comments": { "type": "array", "maxLength": 30 }
       },
       "required": ["userId", "action", "details", "timestamp"]
     }

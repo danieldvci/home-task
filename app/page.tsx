@@ -35,6 +35,9 @@ import { db } from '../lib/firebase';
 import { collection, doc, onSnapshot, setDoc, deleteDoc, updateDoc, query, orderBy, limit, writeBatch } from 'firebase/firestore';
 import { uploadTaskProof, uploadUserAvatar, validateAvatarFile } from '../lib/storage-upload';
 import { Avatar } from '../components/Avatar';
+import { ReactionBar } from '../components/Reactions';
+import { COMMENTS_MAX, COMMENT_MAX_LENGTH } from '../lib/reactions';
+import type { LogComment, ReactionId } from '../lib/reactions';
 import { DoneConfirmModal, SkipConfirmModal, SwapTurnModal } from '../components/TaskModals';
 import { householdDisplayName, profileStorageKey } from '../lib/household-utils';
 import { describeChoreChanges, frequencyLabel, joinDetails, clampDetails } from '../lib/activity';
@@ -67,7 +70,9 @@ type Chore = {
   category?: string;
   rotation: string[]; 
   currentIndex: number; 
-  lastCompletedAt: string | null 
+  lastCompletedAt: string | null;
+  // Points at the completion log so the task card can show its reactions.
+  lastCompletedLogId?: string | null;
 };
 type LogType = {
   id: string;
@@ -76,6 +81,8 @@ type LogType = {
   details: string;
   timestamp: string;
   photoUrl?: string;
+  reactions?: Record<string, string>;
+  comments?: LogComment[];
 };
 
 const MEMBER_SOFT_LIMIT = 20;
@@ -490,8 +497,8 @@ export default function ChoresApp() {
     );
   }
 
-  // Generate an array of dates for the day selector (Today -3 to +3)
-  const daysArray = Array.from({length: 7}).map((_, i) => {
+  // Generate an array of dates for the day selector (Today -3 to +7)
+  const daysArray = Array.from({length: 11}).map((_, i) => {
     const d = new Date(today);
     d.setDate(today.getDate() - 3 + i);
     return d;
@@ -511,20 +518,103 @@ export default function ChoresApp() {
     return logId;
   };
 
+  const handleDeleteLog = async (logId: string) => {
+    if (!householdId || !isAdmin) return;
+    if (!confirm('למחוק רשומת פעילות זו?')) return;
+    try {
+      await deleteDoc(doc(db, 'households', householdId, 'logs', logId));
+    } catch (err) {
+      console.error(err);
+      showToast('מחיקת הרשומה נכשלה');
+    }
+  };
+
+  // Reactions are keyed by the Google account uid, since that is the only
+  // identity the security rules can verify (local residents share an account).
+  const toggleReaction = async (log: LogType, reaction: ReactionId) => {
+    if (!householdId || !user) return;
+    const next = { ...(log.reactions || {}) };
+    if (next[user.uid] === reaction) delete next[user.uid];
+    else next[user.uid] = reaction;
+    try {
+      await updateDoc(doc(db, 'households', householdId, 'logs', log.id), { reactions: next });
+    } catch (err) {
+      console.error(err);
+      showToast('עדכון התגובה נכשל');
+    }
+  };
+
+  const addComment = async (log: LogType, text: string) => {
+    if (!householdId || !currentUserId) return;
+    const comments = log.comments || [];
+    if (comments.length >= COMMENTS_MAX) {
+      showToast('הגעתם למספר התגובות המקסימלי לרשומה זו');
+      return;
+    }
+    const comment: LogComment = {
+      userId: currentUserId,
+      text: text.trim().slice(0, COMMENT_MAX_LENGTH),
+      timestamp: new Date().toISOString()
+    };
+    if (!comment.text) return;
+    try {
+      await updateDoc(doc(db, 'households', householdId, 'logs', log.id), {
+        comments: [...comments, comment]
+      });
+    } catch (err) {
+      console.error(err);
+      showToast('שליחת התגובה נכשלה');
+    }
+  };
+
+  const deleteComment = async (log: LogType, index: number) => {
+    if (!householdId || !isAdmin) return;
+    const comments = log.comments || [];
+    if (index < 0 || index >= comments.length) return;
+    try {
+      await updateDoc(doc(db, 'households', householdId, 'logs', log.id), {
+        comments: comments.filter((_, i) => i !== index)
+      });
+    } catch (err) {
+      console.error(err);
+      showToast('מחיקת התגובה נכשלה');
+    }
+  };
+
+  const renderReactionBar = (log: LogType) => (
+    <ReactionBar
+      reactions={log.reactions}
+      comments={log.comments}
+      myReaction={(user && (log.reactions?.[user.uid] as ReactionId | undefined)) || null}
+      users={users}
+      photoOf={(userId) => resolvePhoto(users.find(u => u.id === userId))}
+      canModerate={isAdmin}
+      onToggleReaction={(reaction) => toggleReaction(log, reaction)}
+      onAddComment={(text) => addComment(log, text)}
+      onDeleteComment={(index) => deleteComment(log, index)}
+    />
+  );
+
   const completeDone = async (choreId: string, photoBlob: Blob | null) => {
     if (!householdId) return;
     const chore = chores.find(c => c.id === choreId);
     if (!chore) return;
+    const activeIdx = getActiveAssigneeIndex(chore, users, chore.currentIndex);
+    const assigneeId = chore.rotation[activeIdx];
+    if (!isAdmin && assigneeId !== currentUserId) {
+      showToast('ניתן לסמן בוצע רק בתור שלך');
+      return;
+    }
     setActionBusy(true);
     try {
       const logId = `l${crypto.randomUUID().split('-')[0]}`;
-      const activeIdx = getActiveAssigneeIndex(chore, users, chore.currentIndex);
       const nextIdx = getNextActiveIndex(chore, users, activeIdx);
       const choreRef = doc(db, 'households', householdId, 'chores', choreId);
       const logRef = doc(db, 'households', householdId, 'logs', logId);
       const choreUpdate = {
         lastCompletedAt: selectedDate.toISOString(),
-        currentIndex: nextIdx
+        currentIndex: nextIdx,
+        lastCompletedLogId: logId
       };
       // Spell out who picks the task up next, and flag a completion that was
       // backdated to a day other than today, so the log is self-explanatory.
@@ -590,11 +680,17 @@ export default function ChoresApp() {
     // skipping absent users the same way forward-advance does.
     const activeIdx = getActiveAssigneeIndex(chore, users, chore.currentIndex);
     const prevIdx = getPrevActiveIndex(chore, users, activeIdx);
+    // After undo, the turn returns to prevIdx; only that person (or admin) may undo.
+    if (!isAdmin && chore.rotation[prevIdx] !== currentUserId) {
+      showToast('ניתן לבטל סימון רק בתור שלך');
+      return;
+    }
 
     try {
       await updateDoc(doc(db, 'households', householdId, 'chores', choreId), {
         lastCompletedAt: null,
-        currentIndex: prevIdx
+        currentIndex: prevIdx,
+        lastCompletedLogId: null
       });
       await logAction(
         'ביטול משימה',
@@ -607,7 +703,7 @@ export default function ChoresApp() {
   };
 
   const completeSkip = async (choreId: string) => {
-    if (!householdId) return;
+    if (!householdId || !isAdmin) return;
     const chore = chores.find(c => c.id === choreId);
     if (!chore) return;
     setActionBusy(true);
@@ -633,7 +729,7 @@ export default function ChoresApp() {
   };
 
   const completeSwap = async (choreId: string, targetUserId: string) => {
-    if (!householdId) return;
+    if (!householdId || !isAdmin) return;
     const chore = chores.find(c => c.id === choreId);
     if (!chore) return;
     setActionBusy(true);
@@ -1153,6 +1249,14 @@ export default function ChoresApp() {
           ) : (
             displayTasks.map(({ chore, assignee, activeIdx }) => {
               const done = isDoneOnDay(chore, selectedDateStr);
+              const canMarkDone = isAdmin || assignee?.id === currentUserId;
+              const completerId = chore.rotation[getPrevActiveIndex(chore, users, activeIdx)];
+              const canUndo = isAdmin || completerId === currentUserId;
+              // Only the 50 most recent logs are loaded, so an old completion
+              // simply renders without a reaction bar.
+              const completionLog = done && chore.lastCompletedLogId
+                ? logs.find(l => l.id === chore.lastCompletedLogId)
+                : undefined;
               return (
                 <motion.div
                   layout
@@ -1205,7 +1309,7 @@ export default function ChoresApp() {
                                 });
                               })()}
                             </div>
-                            <span className="text-sm font-medium text-[#6B5E4C] mr-2 border-r border-[#DED8CE] pr-2">
+                            <span className="text-base font-extrabold text-[#3D3732] mr-2 border-r border-[#DED8CE] pr-2">
                               {assignee.id === currentUserId ? 'התור שלך' : assignee.name}
                             </span>
                           </div>
@@ -1214,7 +1318,7 @@ export default function ChoresApp() {
                             <div className={`w-6 h-6 rounded-full flex items-center justify-center text-white text-xs ${assignee.color}`}>
                               {assignee.name.charAt(0)}
                             </div>
-                            <span className="text-sm font-medium text-[#6B5E4C]">{assignee.id === currentUserId ? 'התור שלך' : assignee.name}</span>
+                            <span className="text-base font-extrabold text-[#3D3732]">{assignee.id === currentUserId ? 'התור שלך' : assignee.name}</span>
                           </div>
                         )}
                       </div>
@@ -1222,19 +1326,24 @@ export default function ChoresApp() {
                   </div>
 
                   {done ? (
-                    <div className="flex items-center justify-between py-3 px-4 bg-[#A1C181]/20 rounded-2xl">
-                      <div className="flex items-center gap-2 text-[#6B5E4C] font-medium">
-                        <CheckCircle2 className="w-5 h-5" />
-                        בוצע
+                    <div className="flex flex-col">
+                      <div className="flex items-center justify-between py-3 px-4 bg-[#A1C181]/20 rounded-2xl">
+                        <div className="flex items-center gap-2 text-[#6B5E4C] font-medium">
+                          <CheckCircle2 className="w-5 h-5" />
+                          בוצע
+                        </div>
+                        {canUndo && (
+                          <button 
+                            onClick={() => handleUndoDone(chore.id)}
+                            className="text-xs font-bold text-[#8C7E6A] bg-white/60 hover:bg-white px-3 py-1.5 rounded-xl transition-all"
+                          >
+                            בטל סימון
+                          </button>
+                        )}
                       </div>
-                      <button 
-                        onClick={() => handleUndoDone(chore.id)}
-                        className="text-xs font-bold text-[#8C7E6A] bg-white/60 hover:bg-white px-3 py-1.5 rounded-xl transition-all"
-                      >
-                        בטל סימון
-                      </button>
+                      {completionLog && renderReactionBar(completionLog)}
                     </div>
-                  ) : (
+                  ) : canMarkDone ? (
                     <div className="flex gap-2">
                       <button
                         onClick={() => setPendingDoneChoreId(chore.id)}
@@ -1243,14 +1352,16 @@ export default function ChoresApp() {
                         <CheckCircle2 className="w-5 h-5" />
                         בוצע
                       </button>
-                      <button
-                        onClick={() => setPendingSkipChoreId(chore.id)}
-                        className="flex items-center justify-center gap-2 px-4 border border-[#E6E0D4] text-[#8C7E6A] rounded-2xl font-medium hover:bg-[#F3EFE9] active:scale-[0.98] transition-all"
-                      >
-                        <FastForward className="w-5 h-5" />
-                        דלג
-                      </button>
-                      {chore.rotation && chore.rotation.length > 1 && (
+                      {isAdmin && (
+                        <button
+                          onClick={() => setPendingSkipChoreId(chore.id)}
+                          className="flex items-center justify-center gap-2 px-4 border border-[#E6E0D4] text-[#8C7E6A] rounded-2xl font-medium hover:bg-[#F3EFE9] active:scale-[0.98] transition-all"
+                        >
+                          <FastForward className="w-5 h-5" />
+                          דלג
+                        </button>
+                      )}
+                      {isAdmin && chore.rotation && chore.rotation.length > 1 && (
                         <button
                           onClick={() => setPendingSwapChoreId(chore.id)}
                           title="החלף תור"
@@ -1259,6 +1370,10 @@ export default function ChoresApp() {
                           <Repeat className="w-5 h-5" />
                         </button>
                       )}
+                    </div>
+                  ) : (
+                    <div className="flex items-center justify-center py-3 px-4 bg-[#F5F1EA] rounded-2xl text-sm font-medium text-[#8C7E6A]">
+                      ממתין ל־{assignee?.name || 'דייר'}
                     </div>
                   )}
                 </motion.div>
@@ -1324,7 +1439,18 @@ export default function ChoresApp() {
                         <div className="flex-1 min-w-0">
                           <div className="flex justify-between items-baseline gap-2">
                             <span className="font-bold text-[#3D3732] truncate">{logUser?.name || 'משתמש לא ידוע'}</span>
-                            <span className="text-xs font-medium text-[#A39788] whitespace-nowrap">{timeStr}</span>
+                            <div className="flex items-center gap-2 flex-shrink-0">
+                              <span className="text-xs font-medium text-[#A39788] whitespace-nowrap">{timeStr}</span>
+                              {isAdmin && (
+                                <button
+                                  onClick={() => handleDeleteLog(log.id)}
+                                  title="מחק רשומה"
+                                  className="p-1 text-rose-400 hover:bg-rose-50 rounded-lg transition-colors"
+                                >
+                                  <Trash2 className="w-3.5 h-3.5" />
+                                </button>
+                              )}
+                            </div>
                           </div>
                           <span className={`inline-flex items-center gap-1 mt-1 text-[11px] font-bold px-2 py-0.5 rounded-lg ${actionClass}`}>
                             <ActionIcon className="w-3 h-3" />
@@ -1341,6 +1467,7 @@ export default function ChoresApp() {
                               />
                             </a>
                           )}
+                          {renderReactionBar(log)}
                         </div>
                       </div>
                     );

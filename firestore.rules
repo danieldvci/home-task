@@ -50,8 +50,10 @@ service cloud.firestore {
       let hasCustom = data.keys().hasAny(['customDays']);
       let hasLastComp = data.keys().hasAny(['lastCompletedAt']);
       let hasCategory = data.keys().hasAny(['category']);
+      let hasLastLog = data.keys().hasAny(['lastCompletedLogId']);
       let baseSize = 4;
-      let totalSize = baseSize + (hasCustom ? 1 : 0) + (hasLastComp ? 1 : 0) + (hasCategory ? 1 : 0);
+      let totalSize = baseSize + (hasCustom ? 1 : 0) + (hasLastComp ? 1 : 0) + (hasCategory ? 1 : 0)
+        + (hasLastLog ? 1 : 0);
 
       return data.keys().hasAll(['name', 'frequency', 'rotation', 'currentIndex'])
         && data.keys().size() == totalSize
@@ -61,25 +63,54 @@ service cloud.firestore {
         && data.currentIndex is number
         && (!hasCustom || (data.customDays is list && data.customDays.size() <= 7))
         && (!hasLastComp || (data.lastCompletedAt == null || (data.lastCompletedAt is string && data.lastCompletedAt.size() <= 40)))
-        && (!hasCategory || (data.category is string && data.category.size() <= 40));
-    }
-
-    // A non-owner member may only reorder an existing rotation (e.g. to swap
-    // turns with another resident), never add, remove, or duplicate entries.
-    function isRotationPermutation(incomingRotation, existingRotation) {
-      return incomingRotation.size() == existingRotation.size()
-        && incomingRotation.hasAll(existingRotation)
-        && existingRotation.hasAll(incomingRotation);
+        && (!hasCategory || (data.category is string && data.category.size() <= 40))
+        && (!hasLastLog || (data.lastCompletedLogId == null || (data.lastCompletedLogId is string && data.lastCompletedLogId.size() <= 128)));
     }
 
     function isValidLog(data) {
       return data.keys().hasAll(['userId', 'action', 'details', 'timestamp'])
-        && data.keys().hasOnly(['userId', 'action', 'details', 'timestamp', 'photoUrl'])
+        && data.keys().hasOnly(['userId', 'action', 'details', 'timestamp', 'photoUrl', 'reactions', 'comments'])
         && data.userId is string && data.userId.size() <= 128
         && data.action is string && data.action.size() <= 100
         && data.details is string && data.details.size() <= 200
         && data.timestamp is string && data.timestamp.size() <= 40
         && (!data.keys().hasAny(['photoUrl']) || (data.photoUrl is string && data.photoUrl.size() <= 2000));
+    }
+
+    // A member may only set or clear the reaction stored under their own uid,
+    // and only to one of the emotions the client offers.
+    function isReactionUpdate() {
+      let before = existing().get('reactions', {});
+      let after = incoming().reactions;
+      return after is map
+        && after.keys().size() <= 20
+        && after.diff(before).affectedKeys().hasOnly([request.auth.uid])
+        && (
+          !after.keys().hasAny([request.auth.uid])
+          || after[request.auth.uid] in ['like', 'love', 'laugh', 'wow', 'dislike']
+        );
+    }
+
+    function isValidComment(c) {
+      return c is map
+        && c.keys().hasOnly(['userId', 'text', 'timestamp'])
+        && c.keys().hasAll(['userId', 'text', 'timestamp'])
+        && c.userId is string && c.userId.size() <= 128
+        && c.text is string && c.text.size() > 0 && c.text.size() <= 200
+        && c.timestamp is string && c.timestamp.size() <= 40;
+    }
+
+    // Members append exactly one comment at a time and keep existing ones.
+    function isCommentAppend() {
+      let before = existing().get('comments', []);
+      let after = incoming().comments;
+      let added = after is list ? after.removeAll(before) : [];
+      return after is list
+        && after.size() == before.size() + 1
+        && after.size() <= 30
+        && after.hasAll(before)
+        && added.size() == 1
+        && isValidComment(added[0]);
     }
 
     function isValidMembersList(m) {
@@ -182,19 +213,16 @@ service cloud.firestore {
           && isValidId(choreId)
           && isValidChoreStrict(incoming());
 
+        // Non-owners may only mark done/undo (turn pointer + completion fields).
+        // Skip/swap (rotation) is owner-only.
         allow update: if isMember(householdId)
           && isValidId(householdId)
           && isValidId(choreId)
           && isValidChoreStrict(incoming())
           && (
             isOwner(householdId)
-            || (
-              incoming().diff(existing()).affectedKeys().hasOnly(['currentIndex', 'lastCompletedAt', 'rotation'])
-              && (
-                !incoming().diff(existing()).affectedKeys().hasAny(['rotation'])
-                || isRotationPermutation(incoming().rotation, existing().rotation)
-              )
-            )
+            || incoming().diff(existing()).affectedKeys()
+                 .hasOnly(['currentIndex', 'lastCompletedAt', 'lastCompletedLogId'])
           );
 
         allow delete: if isOwner(householdId) && isValidId(householdId) && isValidId(choreId);
@@ -207,7 +235,20 @@ service cloud.firestore {
           && isValidId(householdId)
           && isValidId(logId)
           && isValidLog(incoming());
-        allow update, delete: if false;
+        // Reactions and comments are the only mutable parts of a log entry;
+        // the owner may additionally prune them for moderation.
+        allow update: if isMember(householdId)
+          && isValidId(householdId)
+          && isValidId(logId)
+          && (
+            (incoming().diff(existing()).affectedKeys().hasOnly(['reactions']) && isReactionUpdate())
+            || (incoming().diff(existing()).affectedKeys().hasOnly(['comments']) && isCommentAppend())
+            || (
+              isOwner(householdId)
+              && incoming().diff(existing()).affectedKeys().hasOnly(['reactions', 'comments'])
+            )
+          );
+        allow delete: if isOwner(householdId) && isValidId(householdId) && isValidId(logId);
       }
     }
   }
