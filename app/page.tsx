@@ -39,6 +39,8 @@ import { ReactionBar } from '../components/Reactions';
 import { COMMENTS_MAX, COMMENT_MAX_LENGTH } from '../lib/reactions';
 import type { LogComment, ReactionId } from '../lib/reactions';
 import { DoneConfirmModal, SkipConfirmModal, SwapTurnModal, DeleteLogConfirmModal } from '../components/TaskModals';
+import { WeekOverview } from '../components/WeekOverview';
+import type { WeekPerson, WeekRow } from '../components/WeekOverview';
 import { householdDisplayName, profileStorageKey } from '../lib/household-utils';
 import { describeChoreChanges, frequencyLabel, joinDetails, clampDetails } from '../lib/activity';
 import { useToast } from '../components/Toast';
@@ -240,6 +242,14 @@ const getProjectedAssigneeIndex = (chore: Chore, users: UserType[], startIndex: 
   return currentIdx;
 };
 
+// KNOWN LIMITATION (tracked follow-up, needs a schema/rules change - not fixed
+// here): a chore only stores a single lastCompletedAt/lastCompletedLogId pair,
+// so it can represent at most one "done" day at a time. Completing a later
+// occurrence overwrites the marker for any earlier day, which can make an
+// already-completed day appear undone again (and, combined with completeDone,
+// allow that day to be re-completed and double-advance the rotation). A real
+// fix needs per-occurrence completion state (e.g. a `completions` map keyed by
+// day, or a subcollection) plus matching Firestore rules updates.
 const isDoneOnDay = (chore: Chore, targetDayStr: string) => {
   if (!chore.lastCompletedAt) return false;
   const last = new Date(chore.lastCompletedAt);
@@ -274,6 +284,9 @@ export default function ChoresApp() {
   const [selectedUserId, setSelectedUserId] = useState<string | 'all'>('my_tasks');
   const [selectedChoreFilter, setSelectedChoreFilter] = useState<string | 'all'>('all');
   const [selectedCategoryFilter, setSelectedCategoryFilter] = useState<string | 'all'>('all');
+  const [tasksView, setTasksView] = useState<'day' | 'week'>('day');
+  // Empty means "all chores"; otherwise only these rows show in the week view.
+  const [weekChoreIds, setWeekChoreIds] = useState<string[]>([]);
   const isAdmin = !!user && household?.ownerId === user.uid;
   const localUsers = users.filter(u => !u.linkedAuth && u.id !== user?.uid);
   
@@ -505,6 +518,17 @@ export default function ChoresApp() {
     return d;
   });
 
+  // Current calendar week, Sunday through Saturday, for the week overview.
+  const weekDays = (() => {
+    const sunday = normalizeDay(today);
+    sunday.setDate(sunday.getDate() - sunday.getDay());
+    return Array.from({ length: 7 }).map((_, i) => {
+      const d = new Date(sunday);
+      d.setDate(sunday.getDate() + i);
+      return d;
+    });
+  })();
+
   const logAction = async (action: string, details: string, photoUrl?: string) => {
     if (!householdId || !currentUserId) return;
     const logId = `l${crypto.randomUUID().split('-')[0]}`;
@@ -633,7 +657,11 @@ export default function ChoresApp() {
     if (!householdId) return;
     const chore = chores.find(c => c.id === choreId);
     if (!chore) return;
-    const activeIdx = getActiveAssigneeIndex(chore, users, chore.currentIndex);
+    // Project to the day actually being marked done (may be backdated), so the
+    // permission check and rotation advance match what the UI displayed for
+    // that day rather than "today"'s raw pointer.
+    const occurrencesToSelected = getOccurrencesBetween(chore, today, selectedDate);
+    const activeIdx = getProjectedAssigneeIndex(chore, users, chore.currentIndex, occurrencesToSelected);
     const assigneeId = chore.rotation[activeIdx];
     if (!isAdmin && assigneeId !== currentUserId) {
       showToast('ניתן לסמן בוצע רק בתור שלך');
@@ -974,13 +1002,18 @@ export default function ChoresApp() {
     }
     const cid = editingChoreId || `c${crypto.randomUUID().split('-')[0]}`;
     const existingChore = editingChoreId ? chores.find(c => c.id === editingChoreId) : undefined;
+    // Re-point currentIndex at whoever currently holds the turn, since editing
+    // can reorder/add/remove rotation members and the old numeric index would
+    // otherwise silently land on a different person (or go out of bounds).
+    const currentTurnUserId = existingChore?.rotation?.[existingChore.currentIndex];
+    const reindexedCurrentIndex = currentTurnUserId ? newChoreUsers.indexOf(currentTurnUserId) : -1;
     const choreData = {
       name: newChoreName.trim(),
       frequency: newChoreFreq,
       customDays: newChoreFreq === 'custom_days' ? newChoreCustomDays : null,
       category: newChoreCategory || null,
       rotation: newChoreUsers,
-      currentIndex: editingChoreId ? (existingChore?.currentIndex || 0) : 0,
+      currentIndex: editingChoreId ? (reindexedCurrentIndex >= 0 ? reindexedCurrentIndex : 0) : 0,
       lastCompletedAt: editingChoreId ? (existingChore?.lastCompletedAt || null) : null
     };
     
@@ -1174,6 +1207,39 @@ export default function ChoresApp() {
       return true;
     });
 
+    const personFilterId = selectedUserId === 'my_tasks' ? currentUserId : selectedUserId;
+    const toWeekPerson = (u: UserType): WeekPerson => ({
+      id: u.id,
+      name: u.name,
+      color: u.color,
+      photoURL: resolvePhoto(u)
+    });
+
+    // Week matrix: same rotation projection the day view uses, applied to each
+    // day of the current week. Assignments are never stored, only computed.
+    const weekRows: WeekRow[] = chores
+      .filter(chore => weekChoreIds.length === 0 || weekChoreIds.includes(chore.id))
+      .map(chore => ({
+        choreId: chore.id,
+        choreName: chore.name,
+        frequencyLabel: frequencyLabel(chore.frequency, chore.customDays),
+        cells: weekDays.map(day => {
+          if (!choreOccursOnDate(chore, day, today)) return null;
+          const occurrences = getOccurrencesBetween(chore, today, day);
+          const idx = getProjectedAssigneeIndex(chore, users, chore.currentIndex, occurrences);
+          const assignee = users.find(u => u.id === chore.rotation[idx]);
+          if (!assignee) return null;
+          if (personFilterId && personFilterId !== 'all' && assignee.id !== personFilterId) return null;
+          return toWeekPerson(assignee);
+        })
+      }))
+      .filter(row => row.cells.some(Boolean));
+
+    const weekLegendIds = new Set(
+      weekRows.flatMap(row => row.cells.filter((c): c is WeekPerson => !!c).map(c => c.id))
+    );
+    const weekLegend = users.filter(u => weekLegendIds.has(u.id)).map(toWeekPerson);
+
     return (
       <div className="flex flex-col gap-4 pb-24">
         
@@ -1193,19 +1259,7 @@ export default function ChoresApp() {
                 onClick={() => setSelectedUserId(u.id)}
                 className={`flex-shrink-0 flex items-center gap-2 px-3 py-1.5 rounded-2xl transition-all border ${isSelected ? 'bg-white border-[#A1C181] shadow-sm ring-1 ring-[#A1C181]/50' : 'bg-white border-[#E6E0D4] opacity-70 hover:opacity-100 hover:bg-[#F3EFE9]'}`}
               >
-                <div className={`w-6 h-6 rounded-full flex items-center justify-center text-white text-xs overflow-hidden ${u.color}`}>
-                  {resolvePhoto(u) ? (
-                    // eslint-disable-next-line @next/next/no-img-element
-                    <img
-                      src={resolvePhoto(u)}
-                      alt=""
-                      referrerPolicy="no-referrer"
-                      className="w-full h-full object-cover"
-                    />
-                  ) : (
-                    u.name.charAt(0)
-                  )}
-                </div>
+                <Avatar name={u.name} color={u.color} photoURL={resolvePhoto(u)} size="sm" />
                 <span className={`text-sm font-medium ${isSelected ? 'text-[#3D3732]' : 'text-[#8C7E6A]'}`}>
                   {u.id === currentUserId ? 'אני' : u.name}
                 </span>
@@ -1214,6 +1268,60 @@ export default function ChoresApp() {
           })}
         </div>
 
+        {/* Day / Week view toggle */}
+        <div className="flex bg-[#F1ECE3] border border-[#E6E0D4] rounded-2xl p-1 mb-2">
+          {([['day', 'יום'], ['week', 'שבוע']] as const).map(([view, label]) => (
+            <button
+              key={view}
+              onClick={() => setTasksView(view)}
+              className={`flex-1 py-2 rounded-xl text-sm font-bold transition-all ${tasksView === view ? 'bg-white text-[#3D3732] shadow-sm' : 'text-[#8C7E6A] hover:text-[#4A443F]'}`}
+            >
+              {label}
+            </button>
+          ))}
+        </div>
+
+        {tasksView === 'week' ? (
+          <>
+            {/* Task multi-select: nothing selected means all chores */}
+            <div className="flex gap-2 overflow-x-auto pb-1 mb-2 no-scrollbar">
+              <button
+                onClick={() => setWeekChoreIds([])}
+                className={`flex-shrink-0 px-3 py-1.5 rounded-2xl text-xs font-medium transition-all border ${weekChoreIds.length === 0 ? 'bg-[#6B5E4C] text-white border-[#6B5E4C]' : 'bg-white text-[#8C7E6A] border-[#E6E0D4] hover:bg-[#F3EFE9]'}`}
+              >
+                כל המשימות
+              </button>
+              {chores.map(c => {
+                const isSelected = weekChoreIds.includes(c.id);
+                return (
+                  <button
+                    key={c.id}
+                    onClick={() =>
+                      setWeekChoreIds(prev =>
+                        prev.includes(c.id) ? prev.filter(id => id !== c.id) : [...prev, c.id]
+                      )
+                    }
+                    className={`flex-shrink-0 px-3 py-1.5 rounded-2xl text-xs font-medium transition-all border ${isSelected ? 'bg-[#6B5E4C] text-white border-[#6B5E4C]' : 'bg-white text-[#8C7E6A] border-[#E6E0D4] hover:bg-[#F3EFE9]'}`}
+                  >
+                    {c.name}
+                  </button>
+                );
+              })}
+            </div>
+
+            <WeekOverview
+              days={weekDays}
+              todayStr={today.toDateString()}
+              rows={weekRows}
+              legend={weekLegend}
+              onSelectDay={(date) => {
+                setSelectedDate(date);
+                setTasksView('day');
+              }}
+            />
+          </>
+        ) : (
+          <>
         {/* Day Selector */}
         <div className="flex justify-between items-center bg-white border border-[#E6E0D4] rounded-2xl p-2 mb-2 shadow-sm overflow-x-auto">
           {daysArray.map((dateObj, idx) => {
@@ -1288,7 +1396,11 @@ export default function ChoresApp() {
             displayTasks.map(({ chore, assignee, activeIdx }) => {
               const done = isDoneOnDay(chore, selectedDateStr);
               const canMarkDone = isAdmin || assignee?.id === currentUserId;
-              const completerId = chore.rotation[getPrevActiveIndex(chore, users, activeIdx)];
+              // handleUndoDone always reverses from the raw stored pointer
+              // (not the day-projected activeIdx), so mirror that here to
+              // keep the undo button's gating consistent with what it does.
+              const rawActiveIdx = getActiveAssigneeIndex(chore, users, chore.currentIndex);
+              const completerId = chore.rotation[getPrevActiveIndex(chore, users, rawActiveIdx)];
               const canUndo = isAdmin || completerId === currentUserId;
               // Only the 50 most recent logs are loaded, so an old completion
               // simply renders without a reaction bar.
@@ -1419,6 +1531,8 @@ export default function ChoresApp() {
             })
           )}
         </AnimatePresence>
+          </>
+        )}
       </div>
     );
   };
@@ -1701,32 +1815,43 @@ export default function ChoresApp() {
         <section className="bg-white p-5 rounded-3xl border border-[#E6E0D4] shadow-sm flex flex-col gap-4">
           <div className="flex items-center justify-between">
             <div className="flex items-center gap-4">
-              <button
-                type="button"
-                onClick={() => {
-                  if (!currentUserId) return;
-                  setAvatarUploadTargetId(currentUserId);
-                  setAvatarUploadRequestId(id => id + 1);
-                }}
-                disabled={avatarUploading}
-                className="relative group"
-                title="שנה תמונה"
-              >
-                <Avatar
-                  name={currentUser?.name || '?'}
-                  color={currentUser?.color || 'bg-[#D4CBBF]'}
-                  photoURL={resolvePhoto(currentUser)}
-                  size="lg"
-                  className="!w-12 !h-12 !text-lg"
-                />
-                <span className="absolute -bottom-1 -left-1 w-5 h-5 rounded-full bg-[#3D5A80] text-white flex items-center justify-center shadow-sm border-2 border-white">
-                  {avatarUploading && avatarUploadTargetId === currentUserId ? (
-                    <Loader2 className="w-3 h-3 animate-spin" />
-                  ) : (
-                    <Camera className="w-3 h-3" />
-                  )}
-                </span>
-              </button>
+              {/* Firestore only allows a user doc update by its owner (userId
+                  == auth uid) or the household owner, so hide the picker when
+                  acting as a local profile that neither of those apply to —
+                  otherwise the write above would silently be rejected. */}
+              {(() => {
+                const canUploadCurrentAvatar = isAdmin || currentUserId === user?.uid;
+                return (
+                  <button
+                    type="button"
+                    onClick={() => {
+                      if (!currentUserId || !canUploadCurrentAvatar) return;
+                      setAvatarUploadTargetId(currentUserId);
+                      setAvatarUploadRequestId(id => id + 1);
+                    }}
+                    disabled={avatarUploading || !canUploadCurrentAvatar}
+                    className="relative group"
+                    title={canUploadCurrentAvatar ? 'שנה תמונה' : 'רק מנהל הבית יכול לשנות תמונה לדייר מקומי'}
+                  >
+                    <Avatar
+                      name={currentUser?.name || '?'}
+                      color={currentUser?.color || 'bg-[#D4CBBF]'}
+                      photoURL={resolvePhoto(currentUser)}
+                      size="lg"
+                      className="!w-12 !h-12 !text-lg"
+                    />
+                    {canUploadCurrentAvatar && (
+                      <span className="absolute -bottom-1 -left-1 w-5 h-5 rounded-full bg-[#3D5A80] text-white flex items-center justify-center shadow-sm border-2 border-white">
+                        {avatarUploading && avatarUploadTargetId === currentUserId ? (
+                          <Loader2 className="w-3 h-3 animate-spin" />
+                        ) : (
+                          <Camera className="w-3 h-3" />
+                        )}
+                      </span>
+                    )}
+                  </button>
+                );
+              })()}
               <div>
                 <h3 className="font-bold text-[#3D3732] flex items-center gap-2">
                   {currentUser?.name}
