@@ -25,8 +25,10 @@ import {
   Repeat,
   Trophy,
   AlertTriangle,
-  Loader2
+  Loader2,
+  RotateCcw
 } from 'lucide-react';
+import type { LucideIcon } from 'lucide-react';
 import { motion, AnimatePresence } from 'motion/react';
 import { useAuth, useHousehold } from '../lib/hooks';
 import { db } from '../lib/firebase';
@@ -35,6 +37,7 @@ import { uploadTaskProof, uploadUserAvatar, validateAvatarFile } from '../lib/st
 import { Avatar } from '../components/Avatar';
 import { DoneConfirmModal, SkipConfirmModal, SwapTurnModal } from '../components/TaskModals';
 import { householdDisplayName, profileStorageKey } from '../lib/household-utils';
+import { describeChoreChanges, frequencyLabel, joinDetails, clampDetails } from '../lib/activity';
 import { useToast } from '../components/Toast';
 import {
   disableReminders,
@@ -77,6 +80,18 @@ type LogType = {
 
 const MEMBER_SOFT_LIMIT = 20;
 const noopSubscribe = () => () => {};
+
+const ACTION_STYLES: Record<string, { Icon: LucideIcon; className: string }> = {
+  'ביצוע משימה': { Icon: CheckCircle2, className: 'bg-[#A1C181]/20 text-[#5F7A45]' },
+  'ביטול משימה': { Icon: RotateCcw, className: 'bg-[#E9C46A]/25 text-[#8A6D1F]' },
+  'דילוג משימה': { Icon: FastForward, className: 'bg-[#3D5A80]/15 text-[#3D5A80]' },
+  'החלפת תור': { Icon: Repeat, className: 'bg-[#7B6CA8]/20 text-[#5C4F86]' },
+  'יצירת משימה': { Icon: Plus, className: 'bg-[#A1C181]/20 text-[#5F7A45]' },
+  'עריכת משימה': { Icon: Pencil, className: 'bg-[#8C7E6A]/20 text-[#6B5E4C]' },
+  'מחיקת משימה': { Icon: Trash2, className: 'bg-rose-100 text-rose-600' },
+  'ניתוק דייר': { Icon: UserMinus, className: 'bg-rose-100 text-rose-600' }
+};
+const DEFAULT_ACTION_STYLE = { Icon: Activity, className: 'bg-[#F5F1EA] text-[#8C7E6A]' };
 
 // --- Helper Functions ---
 const getActiveAssigneeIndex = (chore: Chore, users: UserType[], startIndex: number) => {
@@ -355,6 +370,8 @@ export default function ChoresApp() {
     setPickingProfile(false);
   };
 
+  const nameOf = (userId?: string) => users.find(u => u.id === userId)?.name || 'דייר שהוסר';
+
   const resolvePhoto = (profile?: UserType | null) => {
     if (!profile) return user?.photoURL || undefined;
     if (profile.id === user?.uid) return profile.photoURL || user?.photoURL || undefined;
@@ -509,10 +526,21 @@ export default function ChoresApp() {
         lastCompletedAt: selectedDate.toISOString(),
         currentIndex: nextIdx
       };
+      // Spell out who picks the task up next, and flag a completion that was
+      // backdated to a day other than today, so the log is self-explanatory.
+      const isBackdated =
+        normalizeDay(selectedDate).getTime() !== normalizeDay(new Date()).getTime();
+      const context = [
+        `התור עובר ל${nameOf(chore.rotation[nextIdx])}`,
+        isBackdated
+          ? `עבור ${selectedDate.toLocaleDateString('he-IL', { day: '2-digit', month: '2-digit' })}`
+          : null
+      ];
+      const baseDetails = `סיים/ה את "${chore.name}"`;
       const logPayload: Record<string, string> = {
         userId: currentUserId!,
         action: 'ביצוע משימה',
-        details: `סיים/ה את משימת "${chore.name}"`,
+        details: joinDetails(baseDetails, context),
         timestamp: new Date().toISOString()
       };
 
@@ -532,7 +560,11 @@ export default function ChoresApp() {
       setPendingDoneChoreId(null);
       uploadTaskProof(householdId, logId, photoBlob)
         .then(
-          (photoUrl) => ({ ...logPayload, photoUrl }),
+          (photoUrl) => ({
+            ...logPayload,
+            details: joinDetails(baseDetails, [...context, 'צורפה תמונה']),
+            photoUrl
+          }),
           (err) => {
             console.error(err);
             showToast('המשימה נשמרה, אך העלאת התמונה נכשלה');
@@ -564,7 +596,10 @@ export default function ChoresApp() {
         lastCompletedAt: null,
         currentIndex: prevIdx
       });
-      await logAction('ביטול משימה', `ביטל/ה את סימון "${chore.name}"`);
+      await logAction(
+        'ביטול משימה',
+        joinDetails(`ביטל/ה את סימון "${chore.name}"`, [`התור חוזר ל${nameOf(chore.rotation[prevIdx])}`])
+      );
     } catch (err) {
       console.error(err);
       showToast('ביטול הסימון נכשל');
@@ -582,7 +617,12 @@ export default function ChoresApp() {
       await updateDoc(doc(db, 'households', householdId, 'chores', choreId), {
         currentIndex: nextIdx
       });
-      await logAction('דילוג משימה', `דילג/ה על משימת "${chore.name}"`);
+      await logAction(
+        'דילוג משימה',
+        joinDetails(`דילג/ה על "${chore.name}"`, [
+          `התור עובר מ${nameOf(chore.rotation[activeIdx])} ל${nameOf(chore.rotation[nextIdx])}`
+        ])
+      );
       setPendingSkipChoreId(null);
     } catch (err) {
       console.error(err);
@@ -608,7 +648,10 @@ export default function ChoresApp() {
       });
       const fromName = users.find(u => u.id === chore.rotation[activeIdx])?.name || 'מישהו';
       const toName = users.find(u => u.id === targetUserId)?.name || 'מישהו';
-      await logAction('החלפת תור', `${fromName} החליף/ה תורות עם ${toName} במשימת "${chore.name}"`);
+      await logAction(
+        'החלפת תור',
+        clampDetails(`${fromName} החליף/ה תורות עם ${toName} במשימת "${chore.name}"`)
+      );
       setPendingSwapChoreId(null);
     } catch (err) {
       console.error(err);
@@ -770,7 +813,13 @@ export default function ChoresApp() {
     if (!confirm(`למחוק את המשימה "${chore.name}"?`)) return;
     try {
       await deleteDoc(doc(db, 'households', householdId, 'chores', choreId));
-      await logAction('מחיקת משימה', `מחק/ה את המשימה "${chore.name}"`);
+      await logAction(
+        'מחיקת משימה',
+        joinDetails(`מחק/ה את המשימה "${chore.name}"`, [
+          frequencyLabel(chore.frequency, chore.customDays),
+          `${chore.rotation.length} משתתפים`
+        ])
+      );
     } catch (err) {
       console.error(err);
       showToast('מחיקת המשימה נכשלה');
@@ -794,14 +843,15 @@ export default function ChoresApp() {
       return;
     }
     const cid = editingChoreId || `c${crypto.randomUUID().split('-')[0]}`;
+    const existingChore = editingChoreId ? chores.find(c => c.id === editingChoreId) : undefined;
     const choreData = {
       name: newChoreName.trim(),
       frequency: newChoreFreq,
       customDays: newChoreFreq === 'custom_days' ? newChoreCustomDays : null,
       category: newChoreCategory || null,
       rotation: newChoreUsers,
-      currentIndex: editingChoreId ? (chores.find(c => c.id === editingChoreId)?.currentIndex || 0) : 0,
-      lastCompletedAt: editingChoreId ? (chores.find(c => c.id === editingChoreId)?.lastCompletedAt || null) : null
+      currentIndex: editingChoreId ? (existingChore?.currentIndex || 0) : 0,
+      lastCompletedAt: editingChoreId ? (existingChore?.lastCompletedAt || null) : null
     };
     
     // Clean up nulls for firestore strict rules if needed, though blueprint accepts them
@@ -811,10 +861,23 @@ export default function ChoresApp() {
     try {
       if (editingChoreId) {
         await updateDoc(doc(db, 'households', householdId, 'chores', cid), choreData);
-        await logAction('עריכת משימה', `ערך/ה את המשימה "${choreData.name}"`);
+        const changes = existingChore
+          ? describeChoreChanges(existingChore, choreData, nameOf)
+          : [];
+        await logAction(
+          'עריכת משימה',
+          joinDetails(`ערך/ה את "${existingChore?.name || choreData.name}"`, changes.length ? changes : ['ללא שינוי'])
+        );
       } else {
         await setDoc(doc(db, 'households', householdId, 'chores', cid), choreData);
-        await logAction('יצירת משימה', `יצר/ה משימה חדשה: "${choreData.name}"`);
+        await logAction(
+          'יצירת משימה',
+          joinDetails(`יצר/ה משימה חדשה: "${choreData.name}"`, [
+            frequencyLabel(choreData.frequency, choreData.customDays),
+            choreData.category ? `תחום: ${choreData.category}` : null,
+            `משתתפים: ${choreData.rotation.map(nameOf).join(', ')}`
+          ])
+        );
       }
       cancelChoreForm();
     } catch (err) {
@@ -1208,6 +1271,23 @@ export default function ChoresApp() {
   };
 
   const renderHistory = () => {
+    const today = normalizeDay(new Date()).getTime();
+    const dayHeading = (iso: string) => {
+      const diffDays = Math.round((today - normalizeDay(new Date(iso)).getTime()) / 86400000);
+      if (diffDays === 0) return 'היום';
+      if (diffDays === 1) return 'אתמול';
+      return new Date(iso).toLocaleDateString('he-IL', { weekday: 'long', day: '2-digit', month: '2-digit' });
+    };
+
+    // logs arrive newest-first, so a linear pass keeps each day contiguous.
+    const groups: { key: string; label: string; items: LogType[] }[] = [];
+    logs.forEach(log => {
+      const key = normalizeDay(new Date(log.timestamp)).toDateString();
+      const current = groups[groups.length - 1];
+      if (current && current.key === key) current.items.push(log);
+      else groups.push({ key, label: dayHeading(log.timestamp), items: [log] });
+    });
+
     return (
       <div className="flex flex-col gap-4 pb-24">
         <div className="bg-white p-6 rounded-3xl border border-[#E6E0D4] shadow-sm">
@@ -1215,46 +1295,60 @@ export default function ChoresApp() {
             <Activity className="w-6 h-6 text-[#A1C181]" />
             יומן פעילות
           </h2>
-          
-          <div className="flex flex-col gap-4">
-            {logs.length === 0 ? (
-              <p className="text-center text-[#8C7E6A] py-8">אין פעילויות עדיין.</p>
-            ) : (
-              logs.map(log => {
-                const logUser = users.find(u => u.id === log.userId);
-                const timeStr = new Date(log.timestamp).toLocaleTimeString('he-IL', { hour: '2-digit', minute: '2-digit' });
-                const dateStr = new Date(log.timestamp).toLocaleDateString('he-IL', { day: '2-digit', month: '2-digit' });
-                return (
-                  <div key={log.id} className="flex gap-3 items-start border-b border-[#F3EFE9] pb-4 last:border-0 last:pb-0">
-                    <Avatar
-                      name={logUser?.name || '?'}
-                      color={logUser?.color || 'bg-[#D4CBBF]'}
-                      photoURL={resolvePhoto(logUser)}
-                      size="md"
-                      className="flex-shrink-0"
-                    />
-                    <div className="flex-1 min-w-0">
-                      <div className="flex justify-between items-baseline mb-1 gap-2">
-                        <span className="font-bold text-[#3D3732]">{logUser?.name || 'משתמש לא ידוע'}</span>
-                        <span className="text-xs font-medium text-[#8C7E6A] bg-[#F5F1EA] px-2 py-0.5 rounded-lg whitespace-nowrap">{dateStr} {timeStr}</span>
-                      </div>
-                      <p className="text-sm text-[#6B5E4C]">{log.details}</p>
-                      {log.photoUrl && (
-                        <a href={log.photoUrl} target="_blank" rel="noreferrer" className="block mt-2">
-                          {/* eslint-disable-next-line @next/next/no-img-element */}
-                          <img
-                            src={log.photoUrl}
-                            alt="הוכחת ביצוע"
-                            className="w-full max-h-40 object-cover rounded-xl border border-[#E6E0D4]"
-                          />
-                        </a>
-                      )}
-                    </div>
+
+          {logs.length === 0 ? (
+            <p className="text-center text-[#8C7E6A] py-8">אין פעילויות עדיין.</p>
+          ) : (
+            <div className="flex flex-col gap-5">
+              {groups.map(group => (
+                <div key={group.key} className="flex flex-col gap-4">
+                  <div className="flex items-center gap-3">
+                    <span className="text-xs font-extrabold text-[#8C7E6A] whitespace-nowrap">{group.label}</span>
+                    <span className="flex-1 h-px bg-[#F3EFE9]" />
                   </div>
-                );
-              })
-            )}
-          </div>
+
+                  {group.items.map(log => {
+                    const logUser = users.find(u => u.id === log.userId);
+                    const { Icon: ActionIcon, className: actionClass } =
+                      ACTION_STYLES[log.action] || DEFAULT_ACTION_STYLE;
+                    const timeStr = new Date(log.timestamp).toLocaleTimeString('he-IL', { hour: '2-digit', minute: '2-digit' });
+                    return (
+                      <div key={log.id} className="flex gap-3 items-start">
+                        <Avatar
+                          name={logUser?.name || '?'}
+                          color={logUser?.color || 'bg-[#D4CBBF]'}
+                          photoURL={resolvePhoto(logUser)}
+                          size="md"
+                          className="flex-shrink-0"
+                        />
+                        <div className="flex-1 min-w-0">
+                          <div className="flex justify-between items-baseline gap-2">
+                            <span className="font-bold text-[#3D3732] truncate">{logUser?.name || 'משתמש לא ידוע'}</span>
+                            <span className="text-xs font-medium text-[#A39788] whitespace-nowrap">{timeStr}</span>
+                          </div>
+                          <span className={`inline-flex items-center gap-1 mt-1 text-[11px] font-bold px-2 py-0.5 rounded-lg ${actionClass}`}>
+                            <ActionIcon className="w-3 h-3" />
+                            {log.action}
+                          </span>
+                          <p className="text-sm text-[#6B5E4C] mt-1.5 leading-relaxed break-words">{log.details}</p>
+                          {log.photoUrl && (
+                            <a href={log.photoUrl} target="_blank" rel="noreferrer" className="block mt-2">
+                              {/* eslint-disable-next-line @next/next/no-img-element */}
+                              <img
+                                src={log.photoUrl}
+                                alt="הוכחת ביצוע"
+                                className="w-full max-h-40 object-cover rounded-xl border border-[#E6E0D4]"
+                              />
+                            </a>
+                          )}
+                        </div>
+                      </div>
+                    );
+                  })}
+                </div>
+              ))}
+            </div>
+          )}
         </div>
       </div>
     );
