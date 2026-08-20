@@ -158,15 +158,20 @@ export function ReactionBar({
                         {author?.name || 'דייר שהוסר'}
                       </span>
                       <span className="text-[10px] font-medium text-[#A39788] whitespace-nowrap">{timeStr}</span>
-                      {canModerate && (
+                      <span
+                        title={canModerate ? undefined : 'רק מנהל הבית יכול לבצע פעולה זו'}
+                        className="ml-auto inline-flex"
+                      >
                         <button
                           onClick={() => onDeleteComment(idx)}
-                          title="מחק תגובה"
-                          className="ml-auto p-0.5 text-rose-400 hover:bg-rose-50 rounded-lg transition-colors"
+                          disabled={!canModerate}
+                          title={canModerate ? 'מחק תגובה' : 'רק מנהל הבית יכול לבצע פעולה זו'}
+                          aria-label={canModerate ? 'מחק תגובה' : 'רק מנהל הבית יכול לבצע פעולה זו'}
+                          className="p-0.5 text-rose-400 hover:bg-rose-50 rounded-lg transition-colors disabled:opacity-40 disabled:pointer-events-none"
                         >
                           <Trash2 className="w-3 h-3" />
                         </button>
-                      )}
+                      </span>
                     </div>
                     <p className="text-xs text-[#6B5E4C] leading-relaxed break-words">{comment.text}</p>
                   </div>

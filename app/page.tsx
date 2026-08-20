@@ -88,7 +88,26 @@ type LogType = {
 };
 
 const MEMBER_SOFT_LIMIT = 20;
+const ADMIN_ONLY_HINT = 'רק מנהל הבית יכול לבצע פעולה זו';
 const noopSubscribe = () => () => {};
+
+function AdminHint({
+  allowed,
+  hint = ADMIN_ONLY_HINT,
+  className = 'inline-flex',
+  children
+}: {
+  allowed: boolean;
+  hint?: string;
+  className?: string;
+  children: React.ReactNode;
+}) {
+  return (
+    <span title={allowed ? undefined : hint} className={className}>
+      {children}
+    </span>
+  );
+}
 
 const ACTION_STYLES: Record<string, { Icon: LucideIcon; className: string }> = {
   'ביצוע משימה': { Icon: CheckCircle2, className: 'bg-[#A1C181]/20 text-[#5F7A45]' },
@@ -288,6 +307,8 @@ export default function ChoresApp() {
   // Empty means "all chores"; otherwise only these rows show in the week view.
   const [weekChoreIds, setWeekChoreIds] = useState<string[]>([]);
   const isAdmin = !!user && household?.ownerId === user.uid;
+  const adminOnlyTitle = isAdmin ? undefined : ADMIN_ONLY_HINT;
+  const adminDisabledClass = 'disabled:opacity-40 disabled:pointer-events-none';
   const localUsers = users.filter(u => !u.linkedAuth && u.id !== user?.uid);
   
   // Day Selector (0 = Sunday, 1 = Monday ...)
@@ -1502,23 +1523,30 @@ export default function ChoresApp() {
                         <CheckCircle2 className="w-5 h-5" />
                         בוצע
                       </button>
-                      {isAdmin && (
+                      <AdminHint allowed={isAdmin} hint="רק מנהל הבית יכול לדלג / להחליף תור">
                         <button
                           onClick={() => setPendingSkipChoreId(chore.id)}
-                          className="flex items-center justify-center gap-2 px-4 border border-[#E6E0D4] text-[#8C7E6A] rounded-2xl font-medium hover:bg-[#F3EFE9] active:scale-[0.98] transition-all"
+                          disabled={!isAdmin}
+                          title={isAdmin ? 'דלג' : 'רק מנהל הבית יכול לדלג / להחליף תור'}
+                          aria-label={isAdmin ? 'דלג' : 'רק מנהל הבית יכול לדלג / להחליף תור'}
+                          className={`flex items-center justify-center gap-2 px-4 border border-[#E6E0D4] text-[#8C7E6A] rounded-2xl font-medium hover:bg-[#F3EFE9] active:scale-[0.98] transition-all ${adminDisabledClass}`}
                         >
                           <FastForward className="w-5 h-5" />
                           דלג
                         </button>
-                      )}
-                      {isAdmin && chore.rotation && chore.rotation.length > 1 && (
-                        <button
-                          onClick={() => setPendingSwapChoreId(chore.id)}
-                          title="החלף תור"
-                          className="flex items-center justify-center px-3 border border-[#E6E0D4] text-[#8C7E6A] rounded-2xl font-medium hover:bg-[#F3EFE9] active:scale-[0.98] transition-all"
-                        >
-                          <Repeat className="w-5 h-5" />
-                        </button>
+                      </AdminHint>
+                      {chore.rotation && chore.rotation.length > 1 && (
+                        <AdminHint allowed={isAdmin} hint="רק מנהל הבית יכול לדלג / להחליף תור">
+                          <button
+                            onClick={() => setPendingSwapChoreId(chore.id)}
+                            disabled={!isAdmin}
+                            title={isAdmin ? 'החלף תור' : 'רק מנהל הבית יכול לדלג / להחליף תור'}
+                            aria-label={isAdmin ? 'החלף תור' : 'רק מנהל הבית יכול לדלג / להחליף תור'}
+                            className={`flex items-center justify-center px-3 border border-[#E6E0D4] text-[#8C7E6A] rounded-2xl font-medium hover:bg-[#F3EFE9] active:scale-[0.98] transition-all ${adminDisabledClass}`}
+                          >
+                            <Repeat className="w-5 h-5" />
+                          </button>
+                        </AdminHint>
                       )}
                     </div>
                   ) : (
@@ -1593,15 +1621,17 @@ export default function ChoresApp() {
                             <span className="font-bold text-[#3D3732] truncate">{logUser?.name || 'משתמש לא ידוע'}</span>
                             <div className="flex items-center gap-2 flex-shrink-0">
                               <span className="text-xs font-medium text-[#A39788] whitespace-nowrap">{timeStr}</span>
-                              {isAdmin && (
+                              <AdminHint allowed={isAdmin}>
                                 <button
                                   onClick={() => setPendingDeleteLogId(log.id)}
-                                  title="מחק רשומה"
-                                  className="p-1 text-rose-400 hover:bg-rose-50 rounded-lg transition-colors"
+                                  disabled={!isAdmin}
+                                  title={isAdmin ? 'מחק רשומה' : adminOnlyTitle}
+                                  aria-label={isAdmin ? 'מחק רשומה' : adminOnlyTitle}
+                                  className={`p-1 text-rose-400 hover:bg-rose-50 rounded-lg transition-colors ${adminDisabledClass}`}
                                 >
                                   <Trash2 className="w-3.5 h-3.5" />
                                 </button>
-                              )}
+                              </AdminHint>
                             </div>
                           </div>
                           <span className={`inline-flex items-center gap-1 mt-1 text-[11px] font-bold px-2 py-0.5 rounded-lg ${actionClass}`}>
@@ -1923,36 +1953,45 @@ export default function ChoresApp() {
             </button>
           </div>
 
-          {isAdmin && householdId && (
+          {householdId && (
             <div className="flex flex-col gap-2 pt-2 border-t border-[#E6E0D4]">
               <p className="text-xs font-bold text-[#8C7E6A]">שם הבית הפעיל</p>
               <div className="flex gap-2">
-                <input
-                  type="text"
-                  value={renameHomeName}
-                  onChange={(e) => setRenameHomeName(e.target.value)}
-                  placeholder={householdDisplayName(household!)}
-                  maxLength={80}
-                  className="flex-1 bg-[#FAF9F6] border border-[#E6E0D4] rounded-xl px-3 py-2 text-sm text-[#3D3732] outline-none focus:border-[#A1C181]"
-                />
-                <button
-                  disabled={homeActionBusy || !renameHomeName.trim()}
-                  onClick={async () => {
-                    if (!householdId) return;
-                    setHomeActionBusy(true);
-                    try {
-                      await renameHousehold(householdId, renameHomeName);
-                      setRenameHomeName('');
-                    } catch {
-                      showToast('שינוי השם נכשל');
-                    } finally {
-                      setHomeActionBusy(false);
-                    }
-                  }}
-                  className="px-3 py-2 bg-[#3D5A80] text-white text-sm font-bold rounded-xl disabled:opacity-40"
-                >
-                  שמור
-                </button>
+                <AdminHint allowed={isAdmin} className="flex-1 inline-flex min-w-0">
+                  <input
+                    type="text"
+                    value={renameHomeName}
+                    onChange={(e) => setRenameHomeName(e.target.value)}
+                    placeholder={householdDisplayName(household!)}
+                    maxLength={80}
+                    disabled={!isAdmin}
+                    title={adminOnlyTitle}
+                    aria-label={isAdmin ? 'שם הבית' : adminOnlyTitle}
+                    className={`w-full bg-[#FAF9F6] border border-[#E6E0D4] rounded-xl px-3 py-2 text-sm text-[#3D3732] outline-none focus:border-[#A1C181] ${adminDisabledClass}`}
+                  />
+                </AdminHint>
+                <AdminHint allowed={isAdmin}>
+                  <button
+                    disabled={!isAdmin || homeActionBusy || !renameHomeName.trim()}
+                    title={adminOnlyTitle}
+                    aria-label={isAdmin ? 'שמור שם בית' : adminOnlyTitle}
+                    onClick={async () => {
+                      if (!householdId || !isAdmin) return;
+                      setHomeActionBusy(true);
+                      try {
+                        await renameHousehold(householdId, renameHomeName);
+                        setRenameHomeName('');
+                      } catch {
+                        showToast('שינוי השם נכשל');
+                      } finally {
+                        setHomeActionBusy(false);
+                      }
+                    }}
+                    className={`px-3 py-2 bg-[#3D5A80] text-white text-sm font-bold rounded-xl ${adminDisabledClass}`}
+                  >
+                    שמור
+                  </button>
+                </AdminHint>
               </div>
 
               <p className="text-xs font-bold text-[#8C7E6A] mt-2">צור בית נוסף</p>
@@ -2151,35 +2190,54 @@ export default function ChoresApp() {
                         {u.isAbsent ? 'לא כאן' : 'נוכח'}
                       </button>
                     )}
-                    {isAdmin && !u.linkedAuth && u.id !== user?.uid && (
+                    {!u.linkedAuth && u.id !== user?.uid && (
                       <>
-                        <button onClick={() => { setEditingUserId(u.id); setEditUserName(u.name); }} className="p-2 text-[#8C7E6A] hover:bg-[#F3EFE9] rounded-xl transition-colors">
-                          <Pencil className="w-4 h-4" />
-                        </button>
-                        <button onClick={() => handleDeleteUser(u.id)} className="p-2 text-rose-400 hover:bg-rose-50 rounded-xl transition-colors">
-                          <Trash2 className="w-4 h-4" />
-                        </button>
+                        <AdminHint allowed={isAdmin}>
+                          <button
+                            onClick={() => { if (!isAdmin) return; setEditingUserId(u.id); setEditUserName(u.name); }}
+                            disabled={!isAdmin}
+                            title={isAdmin ? 'ערוך דייר' : adminOnlyTitle}
+                            aria-label={isAdmin ? 'ערוך דייר' : adminOnlyTitle}
+                            className={`p-2 text-[#8C7E6A] hover:bg-[#F3EFE9] rounded-xl transition-colors ${adminDisabledClass}`}
+                          >
+                            <Pencil className="w-4 h-4" />
+                          </button>
+                        </AdminHint>
+                        <AdminHint allowed={isAdmin}>
+                          <button
+                            onClick={() => handleDeleteUser(u.id)}
+                            disabled={!isAdmin}
+                            title={isAdmin ? 'מחק דייר' : adminOnlyTitle}
+                            aria-label={isAdmin ? 'מחק דייר' : adminOnlyTitle}
+                            className={`p-2 text-rose-400 hover:bg-rose-50 rounded-xl transition-colors ${adminDisabledClass}`}
+                          >
+                            <Trash2 className="w-4 h-4" />
+                          </button>
+                        </AdminHint>
                       </>
                     )}
-                    {isAdmin &&
-                      u.id !== user?.uid &&
+                    {u.id !== user?.uid &&
                       (u.linkedAuth || household?.members.includes(u.id)) && (
-                      <button
-                        type="button"
-                        onClick={() => handleDisconnectMember(u.id)}
-                        title="נתק מהבית"
-                        className="flex items-center gap-1.5 px-3 py-2 text-xs font-medium text-rose-500 hover:bg-rose-50 rounded-2xl transition-colors border border-rose-100"
-                      >
-                        <UserMinus className="w-4 h-4" />
-                        נתק
-                      </button>
+                      <AdminHint allowed={isAdmin}>
+                        <button
+                          type="button"
+                          onClick={() => handleDisconnectMember(u.id)}
+                          disabled={!isAdmin}
+                          title={isAdmin ? 'נתק מהבית' : adminOnlyTitle}
+                          aria-label={isAdmin ? 'נתק מהבית' : adminOnlyTitle}
+                          className={`flex items-center gap-1.5 px-3 py-2 text-xs font-medium text-rose-500 hover:bg-rose-50 rounded-2xl transition-colors border border-rose-100 ${adminDisabledClass}`}
+                        >
+                          <UserMinus className="w-4 h-4" />
+                          נתק
+                        </button>
+                      </AdminHint>
                     )}
                   </div>
                 </div>
               );
             })}
             
-            {isAdmin && (isAddingUser ? (
+            {isAddingUser && isAdmin ? (
               <div className="p-4 flex items-center gap-3 bg-[#FAF9F6]">
                 <input
                   type="text"
@@ -2198,15 +2256,19 @@ export default function ChoresApp() {
                 </button>
               </div>
             ) : (
-              <button 
-                onClick={() => setIsAddingUser(true)}
-                disabled={users.length >= MEMBER_SOFT_LIMIT}
-                className="w-full p-4 flex items-center justify-center gap-2 text-[#8C7E6A] hover:bg-[#F3EFE9] transition-colors disabled:opacity-40 disabled:hover:bg-transparent"
-              >
-                <Plus className="w-4 h-4" />
-                <span className="font-medium text-sm">הוסף דייר מקומי</span>
-              </button>
-            ))}
+              <AdminHint allowed={isAdmin} className="block w-full">
+                <button 
+                  onClick={() => { if (!isAdmin) return; setIsAddingUser(true); }}
+                  disabled={!isAdmin || users.length >= MEMBER_SOFT_LIMIT}
+                  title={!isAdmin ? adminOnlyTitle : undefined}
+                  aria-label={!isAdmin ? adminOnlyTitle : 'הוסף דייר מקומי'}
+                  className={`w-full p-4 flex items-center justify-center gap-2 text-[#8C7E6A] hover:bg-[#F3EFE9] transition-colors disabled:hover:bg-transparent ${adminDisabledClass}`}
+                >
+                  <Plus className="w-4 h-4" />
+                  <span className="font-medium text-sm">הוסף דייר מקומי</span>
+                </button>
+              </AdminHint>
+            )}
           </div>
         </section>
 
@@ -2237,11 +2299,13 @@ export default function ChoresApp() {
           </section>
         )}
 
-        {/* Task Management — admin only */}
-        {isAdmin && (
+        {/* Task Management — visible to all, write actions owner-only */}
         <section>
           <div className="mb-4">
             <h2 className="text-xl font-bold text-[#3D3732]">ניהול משימות</h2>
+            {!isAdmin && (
+              <p className="text-xs text-[#8C7E6A] mt-1">רק מנהל הבית יכול להוסיף או לערוך משימות</p>
+            )}
           </div>
           <div className="flex flex-col gap-3">
             {chores.map(chore => {
@@ -2282,42 +2346,58 @@ export default function ChoresApp() {
                   </p>
                 </div>
                 <div className="flex gap-1">
-                  <button 
-                    onClick={() => (isEditingThis ? cancelChoreForm() : handleEditChore(chore))}
-                    title={isEditingThis ? 'סגור עריכה' : 'ערוך משימה'}
-                    className={`p-2 rounded-xl transition-colors ${
-                      isEditingThis ? 'text-[#6B5E4C] bg-[#A1C181]/15' : 'text-[#8C7E6A] hover:bg-[#F3EFE9]'
-                    }`}
-                  >
-                    {isEditingThis ? <X className="w-5 h-5" /> : <Pencil className="w-5 h-5" />}
-                  </button>
-                  <button 
-                    onClick={() => handleDeleteChore(chore.id)}
-                    className="p-2 text-rose-400 hover:bg-rose-50 rounded-xl transition-colors"
-                  >
-                    <Trash2 className="w-5 h-5" />
-                  </button>
+                  <AdminHint allowed={isAdmin}>
+                    <button 
+                      onClick={() => {
+                        if (!isAdmin) return;
+                        isEditingThis ? cancelChoreForm() : handleEditChore(chore);
+                      }}
+                      disabled={!isAdmin}
+                      title={isAdmin ? (isEditingThis ? 'סגור עריכה' : 'ערוך משימה') : adminOnlyTitle}
+                      aria-label={isAdmin ? (isEditingThis ? 'סגור עריכה' : 'ערוך משימה') : adminOnlyTitle}
+                      className={`p-2 rounded-xl transition-colors ${adminDisabledClass} ${
+                        isEditingThis ? 'text-[#6B5E4C] bg-[#A1C181]/15' : 'text-[#8C7E6A] hover:bg-[#F3EFE9]'
+                      }`}
+                    >
+                      {isEditingThis ? <X className="w-5 h-5" /> : <Pencil className="w-5 h-5" />}
+                    </button>
+                  </AdminHint>
+                  <AdminHint allowed={isAdmin}>
+                    <button 
+                      onClick={() => handleDeleteChore(chore.id)}
+                      disabled={!isAdmin}
+                      title={isAdmin ? 'מחק משימה' : adminOnlyTitle}
+                      aria-label={isAdmin ? 'מחק משימה' : adminOnlyTitle}
+                      className={`p-2 text-rose-400 hover:bg-rose-50 rounded-xl transition-colors ${adminDisabledClass}`}
+                    >
+                      <Trash2 className="w-5 h-5" />
+                    </button>
+                  </AdminHint>
                 </div>
               </div>
-              {isEditingThis && renderChoreForm(chore)}
+              {isEditingThis && isAdmin && renderChoreForm(chore)}
               </div>
               );
             })}
 
-            {isAddingChore && !editingChoreId ? (
+            {isAddingChore && isAdmin && !editingChoreId ? (
               renderChoreForm()
             ) : !isAddingChore ? (
-              <button 
-                onClick={() => setIsAddingChore(true)}
-                className="bg-[#F3EFE9] p-4 rounded-3xl border border-dashed border-[#DED8CE] flex flex-col items-center justify-center mt-2 hover:bg-[#EAE3D5] transition-colors gap-2"
-              >
-                <Plus className="w-6 h-6 text-[#8C7E6A]" />
-                <span className="font-medium text-[#8C7E6A]">הוספת משימה חדשה</span>
-              </button>
+              <AdminHint allowed={isAdmin} className="block">
+                <button 
+                  onClick={() => { if (!isAdmin) return; setIsAddingChore(true); }}
+                  disabled={!isAdmin}
+                  title={!isAdmin ? adminOnlyTitle : undefined}
+                  aria-label={!isAdmin ? adminOnlyTitle : 'הוספת משימה חדשה'}
+                  className={`w-full bg-[#F3EFE9] p-4 rounded-3xl border border-dashed border-[#DED8CE] flex flex-col items-center justify-center mt-2 hover:bg-[#EAE3D5] transition-colors gap-2 ${adminDisabledClass}`}
+                >
+                  <Plus className="w-6 h-6 text-[#8C7E6A]" />
+                  <span className="font-medium text-[#8C7E6A]">הוספת משימה חדשה</span>
+                </button>
+              </AdminHint>
             ) : null}
           </div>
         </section>
-        )}
       </div>
     );
   };
