@@ -17,7 +17,9 @@
       "properties": {
         "name": { "type": "string", "maxLength": 100 },
         "color": { "type": "string", "maxLength": 50 },
-        "isAbsent": { "type": "boolean" },
+        "isAbsent": { "type": "boolean", "description": "Mirror of 'absent right now'; the window below is authoritative" },
+        "absentFrom": { "type": "string", "maxLength": 40, "description": "ISO datetime the absence starts" },
+        "absentUntil": { "type": "string", "maxLength": 40, "description": "ISO datetime the absence ends; null means open-ended" },
         "linkedAuth": { "type": "boolean" },
         "photoURL": { "type": "string", "maxLength": 2000 }
       },
@@ -34,8 +36,13 @@
         "category": { "type": "string", "maxLength": 40 },
         "rotation": { "type": "array", "maxLength": 20 },
         "currentIndex": { "type": "number" },
-        "lastCompletedAt": { "type": "string", "maxLength": 40 },
-        "lastCompletedLogId": { "type": "string", "maxLength": 128 }
+        "lastCompletedAt": { "type": "string", "maxLength": 40, "description": "Newest completed day; denormalised from completions" },
+        "lastCompletedLogId": { "type": "string", "maxLength": 128 },
+        "completions": {
+          "type": "object",
+          "maxLength": 400,
+          "description": "YYYY-MM-DD -> { userId, logId, at }; freezes each completed occurrence to the resident who did it"
+        }
       },
       "required": ["name", "frequency", "rotation", "currentIndex"]
     },

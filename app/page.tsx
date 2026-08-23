@@ -43,6 +43,21 @@ import { WeekOverview } from '../components/WeekOverview';
 import type { WeekPerson, WeekRow } from '../components/WeekOverview';
 import { householdDisplayName, profileStorageKey } from '../lib/household-utils';
 import { describeChoreChanges, frequencyLabel, joinDetails, clampDetails } from '../lib/activity';
+import {
+  absenceWindowLabel,
+  choreOccursOnDate,
+  completionMarkers,
+  getActiveAssigneeIndex,
+  getChoreHealth,
+  getNextActiveIndex,
+  isUserAbsentNow,
+  isUserAbsentOnDay,
+  normalizeDay,
+  resolveDayAssignee,
+  withCompletion,
+  withoutCompletion
+} from '../lib/rotation';
+import type { Chore } from '../lib/rotation';
 import { useToast } from '../components/Toast';
 import {
   disableReminders,
@@ -58,24 +73,16 @@ type UserType = {
   id: string;
   name: string;
   color: string;
+  // Mirrors "absent right now" for legacy readers; the absentFrom/absentUntil
+  // window is what the rotation logic actually reads.
   isAbsent: boolean;
+  absentFrom?: string | null;
+  absentUntil?: string | null;
   linkedAuth?: boolean;
   photoURL?: string;
 };
 const CHORE_CATEGORIES = ['מטבח', 'סלון', 'חדר שינה', 'אמבטיה', 'חוץ', 'אחר'];
 
-type Chore = { 
-  id: string; 
-  name: string; 
-  frequency: 'daily' | 'weekly' | 'custom_days'; 
-  customDays?: number[];
-  category?: string;
-  rotation: string[]; 
-  currentIndex: number; 
-  lastCompletedAt: string | null;
-  // Points at the completion log so the task card can show its reactions.
-  lastCompletedLogId?: string | null;
-};
 type LogType = {
   id: string;
   userId: string;
@@ -121,160 +128,6 @@ const ACTION_STYLES: Record<string, { Icon: LucideIcon; className: string }> = {
 };
 const DEFAULT_ACTION_STYLE = { Icon: Activity, className: 'bg-[#F5F1EA] text-[#8C7E6A]' };
 
-// --- Helper Functions ---
-const getActiveAssigneeIndex = (chore: Chore, users: UserType[], startIndex: number) => {
-  if (!chore.rotation || chore.rotation.length === 0) return -1;
-  for (let i = 0; i < chore.rotation.length; i++) {
-    const checkIndex = (startIndex + i) % chore.rotation.length;
-    const userId = chore.rotation[checkIndex];
-    const user = users.find(u => u.id === userId);
-    if (user && !user.isAbsent) return checkIndex;
-  }
-  return startIndex;
-};
-
-// Next active (non-absent) rotation slot strictly after `fromIndex`.
-const getNextActiveIndex = (chore: Chore, users: UserType[], fromIndex: number) => {
-  if (!chore.rotation || chore.rotation.length === 0) return 0;
-  const start = (fromIndex + 1) % chore.rotation.length;
-  return getActiveAssigneeIndex(chore, users, start);
-};
-
-// Previous active (non-absent) rotation slot strictly before `fromIndex`
-// (mirrors getNextActiveIndex so undo can reverse a forward advance).
-const getPrevActiveIndex = (chore: Chore, users: UserType[], fromIndex: number) => {
-  if (!chore.rotation || chore.rotation.length === 0) return 0;
-  const len = chore.rotation.length;
-  for (let i = 1; i <= len; i++) {
-    const checkIndex = ((fromIndex - i) % len + len) % len;
-    const userId = chore.rotation[checkIndex];
-    const user = users.find(u => u.id === userId);
-    if (user && !user.isAbsent) return checkIndex;
-  }
-  return ((fromIndex - 1) % len + len) % len;
-};
-
-const normalizeDay = (d: Date) => {
-  const nd = new Date(d);
-  nd.setHours(0, 0, 0, 0);
-  return nd;
-};
-
-// Whether a chore is scheduled to occur on `date`, using `anchorDate` as the
-// weekly reference point (matches the direction-agnostic math used by
-// getOccurrencesBetween below, so display and rotation math stay in sync).
-const choreOccursOnDate = (chore: Chore, date: Date, anchorDate: Date) => {
-  if (chore.frequency === 'daily') return true;
-  if (chore.frequency === 'custom_days') return !!chore.customDays?.includes(date.getDay());
-  const d = normalizeDay(date).getTime();
-  const a = normalizeDay(anchorDate).getTime();
-  const diffDays = Math.round(Math.abs(d - a) / (1000 * 60 * 60 * 24));
-  return diffDays % 7 === 0;
-};
-
-// Expected days between occurrences, used for the chore "health" indicator.
-const expectedIntervalDays = (chore: Chore) => {
-  if (chore.frequency === 'daily') return 1;
-  if (chore.frequency === 'weekly') return 7;
-  if (chore.frequency === 'custom_days' && chore.customDays && chore.customDays.length > 0) {
-    return Math.max(1, Math.round(7 / chore.customDays.length));
-  }
-  return 7;
-};
-
-const getChoreHealth = (chore: Chore, referenceDate: Date) => {
-  const expected = expectedIntervalDays(chore);
-  if (!chore.lastCompletedAt) return { daysSince: null as number | null, expected, overdueBy: null as number | null };
-  const last = new Date(chore.lastCompletedAt);
-  const daysSince = Math.floor(
-    (normalizeDay(referenceDate).getTime() - normalizeDay(last).getTime()) / (1000 * 60 * 60 * 24)
-  );
-  return { daysSince, expected, overdueBy: daysSince - expected };
-};
-
-const getOccurrencesBetween = (chore: Chore, startDate: Date, endDate: Date) => {
-  let occurrences = 0;
-  const start = new Date(startDate);
-  start.setHours(0, 0, 0, 0);
-  const end = new Date(endDate);
-  end.setHours(0, 0, 0, 0);
-
-  if (start.getTime() === end.getTime()) return 0;
-
-  const direction = start < end ? 1 : -1;
-  let current = new Date(start);
-
-  const isNotDone = () => direction === 1 ? current.getTime() < end.getTime() : current.getTime() > end.getTime();
-  let loopCount = 0;
-
-  while (isNotDone() && loopCount < 1000) {
-    loopCount++;
-    current.setDate(current.getDate() + direction);
-    current.setHours(0, 0, 0, 0); // Re-normalize to midnight to avoid DST issues
-    
-    let occurs = false;
-    if (chore.frequency === 'daily') {
-      occurs = true;
-    } else if (chore.frequency === 'custom_days') {
-      if (chore.customDays?.includes(current.getDay())) {
-        occurs = true;
-      }
-    } else if (chore.frequency === 'weekly') {
-      const diff = Math.abs(current.getTime() - start.getTime()) / (1000 * 60 * 60 * 24);
-      if (Math.round(diff) % 7 === 0) {
-        occurs = true;
-      }
-    }
-
-    if (occurs) {
-      occurrences += direction;
-    }
-  }
-
-  return occurrences;
-};
-
-const getProjectedAssigneeIndex = (chore: Chore, users: UserType[], startIndex: number, occurrences: number) => {
-  if (!chore.rotation || chore.rotation.length === 0) return -1;
-  let currentIdx = getActiveAssigneeIndex(chore, users, startIndex);
-  if (occurrences === 0) return currentIdx;
-
-  const dir = occurrences >= 0 ? 1 : -1;
-  let steps = Math.abs(occurrences);
-  
-  while (steps > 0) {
-    let advanced = false;
-    for (let i = 1; i <= chore.rotation.length; i++) {
-      let checkIndex = (currentIdx + (dir * i)) % chore.rotation.length;
-      if (checkIndex < 0) checkIndex += chore.rotation.length;
-      const userId = chore.rotation[checkIndex];
-      const user = users.find(u => u.id === userId);
-      if (user && !user.isAbsent) {
-        currentIdx = checkIndex;
-        advanced = true;
-        break;
-      }
-    }
-    if (!advanced) break;
-    steps--;
-  }
-  return currentIdx;
-};
-
-// KNOWN LIMITATION (tracked follow-up, needs a schema/rules change - not fixed
-// here): a chore only stores a single lastCompletedAt/lastCompletedLogId pair,
-// so it can represent at most one "done" day at a time. Completing a later
-// occurrence overwrites the marker for any earlier day, which can make an
-// already-completed day appear undone again (and, combined with completeDone,
-// allow that day to be re-completed and double-advance the rotation). A real
-// fix needs per-occurrence completion state (e.g. a `completions` map keyed by
-// day, or a subcollection) plus matching Firestore rules updates.
-const isDoneOnDay = (chore: Chore, targetDayStr: string) => {
-  if (!chore.lastCompletedAt) return false;
-  const last = new Date(chore.lastCompletedAt);
-  return last.toDateString() === targetDayStr;
-};
-
 // --- Main App Component ---
 export default function ChoresApp() {
   const { showToast } = useToast();
@@ -311,6 +164,14 @@ export default function ChoresApp() {
   const adminDisabledClass = 'disabled:opacity-40 disabled:pointer-events-none';
   const localUsers = users.filter(u => !u.linkedAuth && u.id !== user?.uid);
   
+  // Absence windows start and end on their own, so tick once a minute to keep
+  // a long-open tab in sync with the current time.
+  const [, setClockTick] = useState(0);
+  useEffect(() => {
+    const id = setInterval(() => setClockTick(t => t + 1), 60000);
+    return () => clearInterval(id);
+  }, []);
+
   // Day Selector (0 = Sunday, 1 = Monday ...)
   const today = new Date();
   const [selectedDate, setSelectedDate] = useState<Date>(today);
@@ -426,10 +287,10 @@ export default function ChoresApp() {
     if (!remindersOn || !currentUserId || chores.length === 0) return;
     const todayStr = today.toDateString();
     const myUndoneToday = chores
-      .filter(c => choreOccursOnDate(c, today, today) && !isDoneOnDay(c, todayStr))
+      .filter(c => choreOccursOnDate(c, today, today))
       .filter(c => {
-        const activeIdx = getActiveAssigneeIndex(c, users, c.currentIndex);
-        return c.rotation[activeIdx] === currentUserId;
+        const assignment = resolveDayAssignee(c, users, today, today);
+        return !assignment.done && assignment.userId === currentUserId;
       })
       .map(c => c.name);
     if (myUndoneToday.length > 0) {
@@ -675,43 +536,59 @@ export default function ChoresApp() {
   );
 
   const completeDone = async (choreId: string, photoBlob: Blob | null) => {
-    if (!householdId) return;
+    if (!householdId || !currentUserId) return;
     const chore = chores.find(c => c.id === choreId);
     if (!chore) return;
-    // Project to the day actually being marked done (may be backdated), so the
+    // Resolve the day actually being marked done (may be backdated), so the
     // permission check and rotation advance match what the UI displayed for
     // that day rather than "today"'s raw pointer.
-    const occurrencesToSelected = getOccurrencesBetween(chore, today, selectedDate);
-    const activeIdx = getProjectedAssigneeIndex(chore, users, chore.currentIndex, occurrencesToSelected);
-    const assigneeId = chore.rotation[activeIdx];
-    if (!isAdmin && assigneeId !== currentUserId) {
+    const assignment = resolveDayAssignee(chore, users, selectedDate, today);
+    if (assignment.done) {
+      showToast('המשימה כבר סומנה כבוצעה ליום זה');
+      return;
+    }
+    if (!isAdmin && assignment.userId !== currentUserId) {
       showToast('ניתן לסמן בוצע רק בתור שלך');
       return;
     }
+    // The completed day is frozen to the person it was assigned to, so neither
+    // the rotation advance below nor a later absence can move it on.
+    const completedBy = assignment.userId ?? currentUserId;
+    const isFutureDay = normalizeDay(selectedDate).getTime() > normalizeDay(today).getTime();
     setActionBusy(true);
     try {
       const logId = `l${crypto.randomUUID().split('-')[0]}`;
-      const nextIdx = getNextActiveIndex(chore, users, activeIdx);
+      // Completing an occurrence ahead of time must not steal the turn from the
+      // days in between, so the pointer only moves for today or a past day.
+      const nextIdx = isFutureDay
+        ? chore.currentIndex
+        : getNextActiveIndex(chore, users, assignment.index, selectedDate);
       const choreRef = doc(db, 'households', householdId, 'chores', choreId);
       const logRef = doc(db, 'households', householdId, 'logs', logId);
+      const completions = withCompletion(
+        chore,
+        selectedDate,
+        { userId: completedBy, logId, at: new Date().toISOString() },
+        today
+      );
       const choreUpdate = {
-        lastCompletedAt: selectedDate.toISOString(),
+        ...completionMarkers(completions),
         currentIndex: nextIdx,
-        lastCompletedLogId: logId
+        completions
       };
       // Spell out who picks the task up next, and flag a completion that was
       // backdated to a day other than today, so the log is self-explanatory.
       const isBackdated =
         normalizeDay(selectedDate).getTime() !== normalizeDay(new Date()).getTime();
       const context = [
-        `התור עובר ל${nameOf(chore.rotation[nextIdx])}`,
+        isFutureDay ? null : `התור עובר ל${nameOf(chore.rotation[nextIdx])}`,
         isBackdated
           ? `עבור ${selectedDate.toLocaleDateString('he-IL', { day: '2-digit', month: '2-digit' })}`
           : null
       ];
       const baseDetails = `סיים/ה את "${chore.name}"`;
       const logPayload: Record<string, string> = {
-        userId: currentUserId!,
+        userId: currentUserId,
         action: 'ביצוע משימה',
         details: joinDetails(baseDetails, context),
         timestamp: new Date().toISOString()
@@ -759,25 +636,30 @@ export default function ChoresApp() {
     const chore = chores.find(c => c.id === choreId);
     if (!chore) return;
 
-    // Reverse to whoever was active immediately before this completion,
-    // skipping absent users the same way forward-advance does.
-    const activeIdx = getActiveAssigneeIndex(chore, users, chore.currentIndex);
-    const prevIdx = getPrevActiveIndex(chore, users, activeIdx);
-    // After undo, the turn returns to prevIdx; only that person (or admin) may undo.
-    if (!isAdmin && chore.rotation[prevIdx] !== currentUserId) {
+    const assignment = resolveDayAssignee(chore, users, selectedDate, today);
+    if (!assignment.done) return;
+    // The turn goes back to whoever the completion was recorded against; only
+    // that person (or an admin) may undo it.
+    if (!isAdmin && assignment.completedBy !== currentUserId) {
       showToast('ניתן לבטל סימון רק בתור שלך');
       return;
     }
 
+    const isFutureDay = normalizeDay(selectedDate).getTime() > normalizeDay(today).getTime();
+    const restoredIdx = assignment.index >= 0 ? assignment.index : chore.currentIndex;
+    const completions = withoutCompletion(chore, selectedDate, today);
+
     try {
       await updateDoc(doc(db, 'households', householdId, 'chores', choreId), {
-        lastCompletedAt: null,
-        currentIndex: prevIdx,
-        lastCompletedLogId: null
+        ...completionMarkers(completions),
+        currentIndex: isFutureDay ? chore.currentIndex : restoredIdx,
+        completions
       });
       await logAction(
         'ביטול משימה',
-        joinDetails(`ביטל/ה את סימון "${chore.name}"`, [`התור חוזר ל${nameOf(chore.rotation[prevIdx])}`])
+        joinDetails(`ביטל/ה את סימון "${chore.name}"`, [
+          isFutureDay ? null : `התור חוזר ל${nameOf(chore.rotation[restoredIdx])}`
+        ])
       );
     } catch (err) {
       console.error(err);
@@ -791,8 +673,8 @@ export default function ChoresApp() {
     if (!chore) return;
     setActionBusy(true);
     try {
-      const activeIdx = getActiveAssigneeIndex(chore, users, chore.currentIndex);
-      const nextIdx = getNextActiveIndex(chore, users, activeIdx);
+      const activeIdx = getActiveAssigneeIndex(chore, users, chore.currentIndex, today);
+      const nextIdx = getNextActiveIndex(chore, users, activeIdx, today);
       await updateDoc(doc(db, 'households', householdId, 'chores', choreId), {
         currentIndex: nextIdx
       });
@@ -817,7 +699,7 @@ export default function ChoresApp() {
     if (!chore) return;
     setActionBusy(true);
     try {
-      const activeIdx = getActiveAssigneeIndex(chore, users, chore.currentIndex);
+      const activeIdx = getActiveAssigneeIndex(chore, users, chore.currentIndex, today);
       const targetIdx = chore.rotation.indexOf(targetUserId);
       if (targetIdx === -1 || targetIdx === activeIdx) throw new Error('invalid_swap_target');
       const newRotation = [...chore.rotation];
@@ -840,16 +722,27 @@ export default function ChoresApp() {
     }
   };
 
-  const toggleAbsent = async (userId: string) => {
+  // Absence is a datetime window. `isAbsent` is still written as a mirror of
+  // "absent right now" so older readers and the security rules keep working,
+  // but every rotation decision reads the window instead.
+  const setAbsence = async (userId: string, from: Date | null, until: Date | null) => {
     if (!householdId) return;
     const u = users.find(u => u.id === userId);
     if (!u) return;
     if (!isAdmin && userId !== user?.uid) return;
+    if (from && until && until.getTime() <= from.getTime()) {
+      showToast('זמן הסיום חייב להיות אחרי זמן ההתחלה');
+      return;
+    }
+    const absentFrom = from ? from.toISOString() : null;
+    const absentUntil = until ? until.toISOString() : null;
     try {
       await updateDoc(doc(db, 'households', householdId, 'users', userId), {
         name: u.name,
         color: u.color,
-        isAbsent: !u.isAbsent,
+        isAbsent: isUserAbsentNow({ id: userId, absentFrom, absentUntil }),
+        absentFrom,
+        absentUntil,
         linkedAuth: u.linkedAuth ?? (u.id === user?.uid),
         ...(u.photoURL ? { photoURL: u.photoURL } : {})
       });
@@ -857,6 +750,14 @@ export default function ChoresApp() {
       console.error(err);
       showToast('עדכון הסטטוס נכשל');
     }
+  };
+
+  // Open-ended absence starting now, or a return that clears the window.
+  const toggleAbsent = async (userId: string) => {
+    const u = users.find(u => u.id === userId);
+    if (!u) return;
+    if (isUserAbsentNow(u, today)) await setAbsence(userId, null, null);
+    else await setAbsence(userId, new Date(), null);
   };
 
   const handleSaveUserEdit = async () => {
@@ -868,6 +769,8 @@ export default function ChoresApp() {
         name: editUserName.trim(),
         color: u.color,
         isAbsent: u.isAbsent,
+        absentFrom: u.absentFrom ?? null,
+        absentUntil: u.absentUntil ?? null,
         linkedAuth: u.linkedAuth ?? false,
         ...(u.photoURL ? { photoURL: u.photoURL } : {})
       });
@@ -1136,12 +1039,12 @@ export default function ChoresApp() {
     : 0;
   const swapCandidates = pendingSwapChore
     ? (() => {
-        const activeIdx = getActiveAssigneeIndex(pendingSwapChore, users, pendingSwapChore.currentIndex);
+        const activeIdx = getActiveAssigneeIndex(pendingSwapChore, users, pendingSwapChore.currentIndex, today);
         const activeUserId = pendingSwapChore.rotation[activeIdx];
         return pendingSwapChore.rotation
           .filter(uid => uid !== activeUserId)
           .map(uid => users.find(u => u.id === uid))
-          .filter((u): u is UserType => !!u && !u.isAbsent);
+          .filter((u): u is UserType => !!u && !isUserAbsentOnDay(u, today));
       })()
     : [];
 
@@ -1200,11 +1103,11 @@ export default function ChoresApp() {
   const renderTasks = () => {
     const isPastDay = normalizeDay(selectedDate).getTime() < normalizeDay(today).getTime();
     const activeTasks = chores.map(chore => {
-      const occurrences = getOccurrencesBetween(chore, today, selectedDate);
-      const activeIdx = getProjectedAssigneeIndex(chore, users, chore.currentIndex, occurrences);
-      const activeUserId = chore.rotation[activeIdx];
-      const assignee = users.find(u => u.id === activeUserId);
-      return { chore, assignee, activeUserId, activeIdx };
+      // A completed day resolves to the person who completed it; only an open
+      // day follows the rotation pointer.
+      const assignment = resolveDayAssignee(chore, users, selectedDate, today);
+      const assignee = users.find(u => u.id === assignment.userId);
+      return { chore, assignment, assignee, activeUserId: assignment.userId, activeIdx: assignment.index };
     });
 
     const displayTasks = activeTasks.filter(item => {
@@ -1236,8 +1139,9 @@ export default function ChoresApp() {
       photoURL: resolvePhoto(u)
     });
 
-    // Week matrix: same rotation projection the day view uses, applied to each
-    // day of the current week. Assignments are never stored, only computed.
+    // Week matrix: same day resolution the day view uses, applied to each day of
+    // the current week. Open days are computed, completed days are read back
+    // from the completion they were frozen to.
     const weekRows: WeekRow[] = chores
       .filter(chore => weekChoreIds.length === 0 || weekChoreIds.includes(chore.id))
       .map(chore => ({
@@ -1246,9 +1150,7 @@ export default function ChoresApp() {
         frequencyLabel: frequencyLabel(chore.frequency, chore.customDays),
         cells: weekDays.map(day => {
           if (!choreOccursOnDate(chore, day, today)) return null;
-          const occurrences = getOccurrencesBetween(chore, today, day);
-          const idx = getProjectedAssigneeIndex(chore, users, chore.currentIndex, occurrences);
-          const assignee = users.find(u => u.id === chore.rotation[idx]);
+          const assignee = users.find(u => u.id === resolveDayAssignee(chore, users, day, today).userId);
           if (!assignee) return null;
           if (personFilterId && personFilterId !== 'all' && assignee.id !== personFilterId) return null;
           return toWeekPerson(assignee);
@@ -1414,19 +1316,16 @@ export default function ChoresApp() {
               <p className="text-[#8C7E6A]">הכל נקי ומסודר.</p>
             </motion.div>
           ) : (
-            displayTasks.map(({ chore, assignee, activeIdx }) => {
-              const done = isDoneOnDay(chore, selectedDateStr);
+            displayTasks.map(({ chore, assignment, assignee, activeIdx }) => {
+              const done = assignment.done;
               const canMarkDone = isAdmin || assignee?.id === currentUserId;
-              // handleUndoDone always reverses from the raw stored pointer
-              // (not the day-projected activeIdx), so mirror that here to
-              // keep the undo button's gating consistent with what it does.
-              const rawActiveIdx = getActiveAssigneeIndex(chore, users, chore.currentIndex);
-              const completerId = chore.rotation[getPrevActiveIndex(chore, users, rawActiveIdx)];
-              const canUndo = isAdmin || completerId === currentUserId;
+              // Undo returns the turn to the recorded completer, so gate the
+              // button on the same person handleUndoDone will restore.
+              const canUndo = isAdmin || assignment.completedBy === currentUserId;
               // Only the 50 most recent logs are loaded, so an old completion
               // simply renders without a reaction bar.
-              const completionLog = done && chore.lastCompletedLogId
-                ? logs.find(l => l.id === chore.lastCompletedLogId)
+              const completionLog = assignment.logId
+                ? logs.find(l => l.id === assignment.logId)
                 : undefined;
               return (
                 <motion.div
@@ -1460,9 +1359,12 @@ export default function ChoresApp() {
                             <span className="text-[10px] font-bold text-[#8C7E6A] ml-1">תור:</span>
                             <div className="flex items-center" dir="ltr">
                               {(() => {
+                                // activeIdx is -1 when the day is frozen to
+                                // someone who has since left the rotation.
+                                const startAt = activeIdx >= 0 ? activeIdx : 0;
                                 const orderedRotation = [
-                                  ...chore.rotation.slice(activeIdx),
-                                  ...chore.rotation.slice(0, activeIdx)
+                                  ...chore.rotation.slice(startAt),
+                                  ...chore.rotation.slice(0, startAt)
                                 ];
                                 return orderedRotation.map((uId, i) => {
                                   const u = users.find(x => x.id === uId);
@@ -2128,6 +2030,9 @@ export default function ChoresApp() {
               }
               const canToggleAbsent = isAdmin || u.id === user?.uid;
               const canUploadAvatar = isAdmin || u.id === user?.uid;
+              // Read the absence window rather than the stored mirror, so a
+              // window that has already ended stops greying the resident out.
+              const absentNow = isUserAbsentNow(u, today);
               return (
                 <div key={u.id} className="flex items-center justify-between p-4">
                   <div className="flex items-center gap-3">
@@ -2147,7 +2052,7 @@ export default function ChoresApp() {
                           color={u.color}
                           photoURL={resolvePhoto(u)}
                           size="md"
-                          className={u.isAbsent ? 'opacity-40 grayscale' : ''}
+                          className={absentNow ? 'opacity-40 grayscale' : ''}
                         />
                         <span className="absolute -bottom-1 -left-1 w-4 h-4 rounded-full bg-[#3D5A80] text-white flex items-center justify-center shadow-sm border-2 border-white">
                           {avatarUploading && avatarUploadTargetId === u.id ? (
@@ -2163,11 +2068,11 @@ export default function ChoresApp() {
                         color={u.color}
                         photoURL={resolvePhoto(u)}
                         size="md"
-                        className={u.isAbsent ? 'opacity-40 grayscale' : ''}
+                        className={absentNow ? 'opacity-40 grayscale' : ''}
                       />
                     )}
                     <div>
-                      <span className={`font-medium ${u.isAbsent ? 'text-[#A39788] line-through' : 'text-[#4A443F]'}`}>
+                      <span className={`font-medium ${absentNow ? 'text-[#A39788] line-through' : 'text-[#4A443F]'}`}>
                         {u.name}
                       </span>
                       <p className="text-[10px] text-[#A39788]">
@@ -2180,14 +2085,15 @@ export default function ChoresApp() {
                     {canToggleAbsent && (
                       <button
                         onClick={() => toggleAbsent(u.id)}
+                        title={absenceWindowLabel(u) || undefined}
                         className={`flex items-center gap-2 px-3 py-2 rounded-2xl text-xs font-medium transition-colors border ${
-                          u.isAbsent 
+                          absentNow
                           ? 'bg-[#F3EFE9] text-[#8C7E6A] hover:bg-[#EAE3D5] border-[#E6E0D4]' 
                           : 'bg-[#A1C181]/10 text-[#6B5E4C] hover:bg-[#A1C181]/20 border-[#A1C181]/30'
                         }`}
                       >
-                        {u.isAbsent ? <UserX className="w-4 h-4" /> : <UserCheck className="w-4 h-4" />}
-                        {u.isAbsent ? 'לא כאן' : 'נוכח'}
+                        {absentNow ? <UserX className="w-4 h-4" /> : <UserCheck className="w-4 h-4" />}
+                        {absentNow ? 'לא כאן' : 'נוכח'}
                       </button>
                     )}
                     {!u.linkedAuth && u.id !== user?.uid && (

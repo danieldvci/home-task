@@ -36,13 +36,20 @@ service cloud.firestore {
         && (!hasName || (data.name is string && data.name.size() > 0 && data.name.size() <= 80));
     }
 
+    // absentFrom/absentUntil describe the absence window as ISO datetimes;
+    // isAbsent is the "absent right now" mirror kept for older clients.
     function isValidUser(data) {
+      let hasFrom = data.keys().hasAny(['absentFrom']);
+      let hasUntil = data.keys().hasAny(['absentUntil']);
+
       return data.keys().hasAll(['name', 'color', 'isAbsent', 'linkedAuth'])
-        && data.keys().hasOnly(['name', 'color', 'isAbsent', 'linkedAuth', 'photoURL'])
+        && data.keys().hasOnly(['name', 'color', 'isAbsent', 'linkedAuth', 'photoURL', 'absentFrom', 'absentUntil'])
         && data.name is string && data.name.size() <= 100
         && data.color is string && data.color.size() <= 50
         && data.isAbsent is bool
         && data.linkedAuth is bool
+        && (!hasFrom || data.absentFrom == null || (data.absentFrom is string && data.absentFrom.size() <= 40))
+        && (!hasUntil || data.absentUntil == null || (data.absentUntil is string && data.absentUntil.size() <= 40))
         && (!data.keys().hasAny(['photoURL']) || (data.photoURL is string && data.photoURL.size() <= 2000));
     }
 
@@ -51,9 +58,13 @@ service cloud.firestore {
       let hasLastComp = data.keys().hasAny(['lastCompletedAt']);
       let hasCategory = data.keys().hasAny(['category']);
       let hasLastLog = data.keys().hasAny(['lastCompletedLogId']);
+      // Per-day completion records: { 'YYYY-MM-DD': { userId, logId, at } }.
+      // Rules cannot iterate map values, so only the shape of the map itself is
+      // checked here; entry contents are written by the client.
+      let hasCompletions = data.keys().hasAny(['completions']);
       let baseSize = 4;
       let totalSize = baseSize + (hasCustom ? 1 : 0) + (hasLastComp ? 1 : 0) + (hasCategory ? 1 : 0)
-        + (hasLastLog ? 1 : 0);
+        + (hasLastLog ? 1 : 0) + (hasCompletions ? 1 : 0);
 
       return data.keys().hasAll(['name', 'frequency', 'rotation', 'currentIndex'])
         && data.keys().size() == totalSize
@@ -64,7 +75,8 @@ service cloud.firestore {
         && (!hasCustom || (data.customDays is list && data.customDays.size() <= 7))
         && (!hasLastComp || (data.lastCompletedAt == null || (data.lastCompletedAt is string && data.lastCompletedAt.size() <= 40)))
         && (!hasCategory || (data.category is string && data.category.size() <= 40))
-        && (!hasLastLog || (data.lastCompletedLogId == null || (data.lastCompletedLogId is string && data.lastCompletedLogId.size() <= 128)));
+        && (!hasLastLog || (data.lastCompletedLogId == null || (data.lastCompletedLogId is string && data.lastCompletedLogId.size() <= 128)))
+        && (!hasCompletions || (data.completions is map && data.completions.size() <= 400));
     }
 
     function isValidLog(data) {
@@ -198,7 +210,7 @@ service cloud.firestore {
           && isValidUser(incoming())
           && (
             isOwner(householdId)
-            || (userId == request.auth.uid && incoming().diff(existing()).affectedKeys().hasOnly(['isAbsent', 'name', 'photoURL', 'color', 'linkedAuth']))
+            || (userId == request.auth.uid && incoming().diff(existing()).affectedKeys().hasOnly(['isAbsent', 'absentFrom', 'absentUntil', 'name', 'photoURL', 'color', 'linkedAuth']))
           );
 
         allow delete: if isOwner(householdId) && isValidId(householdId) && isValidId(userId);
@@ -222,7 +234,7 @@ service cloud.firestore {
           && (
             isOwner(householdId)
             || incoming().diff(existing()).affectedKeys()
-                 .hasOnly(['currentIndex', 'lastCompletedAt', 'lastCompletedLogId'])
+                 .hasOnly(['currentIndex', 'lastCompletedAt', 'lastCompletedLogId', 'completions'])
           );
 
         allow delete: if isOwner(householdId) && isValidId(householdId) && isValidId(choreId);
