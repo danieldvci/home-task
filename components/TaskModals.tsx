@@ -5,55 +5,191 @@ import { Camera, CheckCircle2, X, ImagePlus, Repeat, Loader2, Trash2 } from 'luc
 import { motion } from 'motion/react';
 import { Avatar } from './Avatar';
 import { compressImage } from '../lib/image';
-import { validateProofFile } from '../lib/storage-upload';
+import { MAX_PROOF_PHOTOS, validateProofFile } from '../lib/storage-upload';
+
+type PickedPhoto = { id: string; preview: string; blob: Blob | null };
+
+type PhotoPickerProps = {
+  disabled?: boolean;
+  max?: number;
+  /** Fires on every change with the compressed blobs and whether work is pending. */
+  onChange: (photos: Blob[], processing: boolean) => void;
+};
+
+/**
+ * Camera and gallery picker for proof photos.
+ *
+ * Android decides between camera and gallery from the `capture` attribute, and
+ * a single input can only offer one of them: with `capture` the gallery is
+ * unreachable, without it most devices go straight to the gallery. Two inputs
+ * behind two buttons is the only way to offer both.
+ */
+export function PhotoPicker({ disabled, max = MAX_PROOF_PHOTOS, onChange }: PhotoPickerProps) {
+  const cameraRef = useRef<HTMLInputElement>(null);
+  const galleryRef = useRef<HTMLInputElement>(null);
+  const [items, setItems] = useState<PickedPhoto[]>([]);
+  const [pending, setPending] = useState(0);
+  const [error, setError] = useState<string | null>(null);
+
+  // Kept in a ref so an inline parent callback cannot retrigger the effect.
+  const onChangeRef = useRef(onChange);
+  onChangeRef.current = onChange;
+
+  useEffect(() => {
+    onChangeRef.current(
+      items.map(i => i.blob).filter((b): b is Blob => !!b),
+      pending > 0
+    );
+  }, [items, pending]);
+
+  const itemsRef = useRef(items);
+  itemsRef.current = items;
+  useEffect(() => {
+    return () => {
+      itemsRef.current.forEach(i => URL.revokeObjectURL(i.preview));
+    };
+  }, []);
+
+  const addFiles = async (files: File[]) => {
+    setError(null);
+    const room = max - itemsRef.current.length;
+    if (room <= 0) return;
+    if (files.length > room) setError(`אפשר לצרף עד ${max} תמונות`);
+
+    const accepted: PickedPhoto[] = [];
+    for (const file of files.slice(0, room)) {
+      const validationError = validateProofFile(file);
+      if (validationError) {
+        setError(validationError);
+        continue;
+      }
+      accepted.push({ id: crypto.randomUUID(), preview: URL.createObjectURL(file), blob: null });
+    }
+    if (accepted.length === 0) return;
+
+    setItems(prev => [...prev, ...accepted]);
+    setPending(p => p + accepted.length);
+
+    await Promise.all(
+      accepted.map(async (item, i) => {
+        try {
+          const compressed = await compressImage(files[i]);
+          setItems(prev => prev.map(x => (x.id === item.id ? { ...x, blob: compressed } : x)));
+        } catch (err) {
+          console.error(err);
+          setError('עיבוד התמונה נכשל. אפשר לאשר בלי תמונה.');
+          setItems(prev => prev.filter(x => x.id !== item.id));
+          URL.revokeObjectURL(item.preview);
+        } finally {
+          setPending(p => p - 1);
+        }
+      })
+    );
+  };
+
+  const removeItem = (id: string) => {
+    setItems(prev => {
+      const target = prev.find(x => x.id === id);
+      if (target) URL.revokeObjectURL(target.preview);
+      return prev.filter(x => x.id !== id);
+    });
+    setError(null);
+  };
+
+  const atMax = items.length >= max;
+
+  return (
+    <div className="flex flex-col gap-2">
+      <input
+        ref={cameraRef}
+        type="file"
+        accept="image/*"
+        capture="environment"
+        className="hidden"
+        onChange={(e) => {
+          const files = Array.from(e.target.files || []);
+          e.target.value = '';
+          addFiles(files);
+        }}
+      />
+      <input
+        ref={galleryRef}
+        type="file"
+        accept="image/*"
+        multiple
+        className="hidden"
+        onChange={(e) => {
+          const files = Array.from(e.target.files || []);
+          e.target.value = '';
+          addFiles(files);
+        }}
+      />
+
+      {items.length > 0 && (
+        <div className="grid grid-cols-3 gap-2">
+          {items.map(item => (
+            <div
+              key={item.id}
+              className="relative aspect-square rounded-2xl overflow-hidden border border-[#E6E0D4] bg-[#FAF9F6]"
+            >
+              {/* eslint-disable-next-line @next/next/no-img-element */}
+              <img src={item.preview} alt="תצוגה מקדימה" className="w-full h-full object-cover" />
+              {!item.blob && (
+                <div className="absolute inset-0 flex items-center justify-center bg-black/40 text-white">
+                  <Loader2 className="w-5 h-5 animate-spin" />
+                </div>
+              )}
+              <button
+                type="button"
+                onClick={() => removeItem(item.id)}
+                disabled={disabled}
+                aria-label="הסר תמונה"
+                className="absolute top-1 left-1 bg-white/90 text-[#8C7E6A] p-1.5 rounded-full shadow-sm"
+              >
+                <X className="w-3.5 h-3.5" />
+              </button>
+            </div>
+          ))}
+        </div>
+      )}
+
+      <div className="flex gap-2">
+        <button
+          type="button"
+          onClick={() => cameraRef.current?.click()}
+          disabled={disabled || atMax}
+          className="flex-1 flex items-center justify-center gap-2 py-3 rounded-2xl border border-dashed border-[#DED8CE] bg-[#FAF9F6] text-[#8C7E6A] text-sm font-medium hover:bg-[#F3EFE9] disabled:opacity-40"
+        >
+          <Camera className="w-5 h-5" />
+          צלם
+        </button>
+        <button
+          type="button"
+          onClick={() => galleryRef.current?.click()}
+          disabled={disabled || atMax}
+          className="flex-1 flex items-center justify-center gap-2 py-3 rounded-2xl border border-dashed border-[#DED8CE] bg-[#FAF9F6] text-[#8C7E6A] text-sm font-medium hover:bg-[#F3EFE9] disabled:opacity-40"
+        >
+          <ImagePlus className="w-5 h-5" />
+          בחר מהגלריה
+        </button>
+      </div>
+
+      {atMax && <p className="text-xs text-[#A39788]">הגעת למקסימום {max} תמונות</p>}
+      {error && <p className="text-sm text-rose-500">{error}</p>}
+    </div>
+  );
+}
 
 type Props = {
   choreName: string;
   busy?: boolean;
-  onConfirm: (photo: Blob | null) => void;
+  onConfirm: (photos: Blob[]) => void;
   onCancel: () => void;
 };
 
 export function DoneConfirmModal({ choreName, busy, onConfirm, onCancel }: Props) {
-  const inputRef = useRef<HTMLInputElement>(null);
-  const [preview, setPreview] = useState<string | null>(null);
-  const [photo, setPhoto] = useState<Blob | null>(null);
+  const [photos, setPhotos] = useState<Blob[]>([]);
   const [processing, setProcessing] = useState(false);
-  const [error, setError] = useState<string | null>(null);
-
-  useEffect(() => {
-    return () => {
-      if (preview) URL.revokeObjectURL(preview);
-    };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
-
-  const onPick = async (f: File | null) => {
-    if (preview) URL.revokeObjectURL(preview);
-    setError(null);
-    setPhoto(null);
-    if (!f) {
-      setPreview(null);
-      return;
-    }
-    const validationError = validateProofFile(f);
-    if (validationError) {
-      setPreview(null);
-      setError(validationError);
-      return;
-    }
-    setPreview(URL.createObjectURL(f));
-    setProcessing(true);
-    try {
-      const compressed = await compressImage(f);
-      setPhoto(compressed);
-    } catch (err) {
-      console.error(err);
-      setError('עיבוד התמונה נכשל. אפשר לאשר בלי תמונה.');
-    } finally {
-      setProcessing(false);
-    }
-  };
 
   return (
     <div className="fixed inset-0 z-50 flex items-end sm:items-center justify-center bg-black/40 p-4">
@@ -77,77 +213,52 @@ export function DoneConfirmModal({ choreName, busy, onConfirm, onCancel }: Props
           </button>
         </div>
 
-        <p className="text-sm text-[#6B5E4C]">אפשר לצרף תמונה כהוכחה (מומלץ). אפשר גם לאשר בלי תמונה.</p>
+        <p className="text-sm text-[#6B5E4C]">
+          אפשר לצרף עד {MAX_PROOF_PHOTOS} תמונות כהוכחה (מומלץ). אפשר גם לאשר בלי תמונה.
+        </p>
 
-        <input
-          ref={inputRef}
-          type="file"
-          accept="image/*"
-          className="hidden"
-          onChange={(e) => {
-            const f = e.target.files?.[0] || null;
-            e.target.value = '';
-            onPick(f);
+        <PhotoPicker
+          disabled={busy}
+          onChange={(next, isProcessing) => {
+            setPhotos(next);
+            setProcessing(isProcessing);
           }}
         />
-
-        {preview ? (
-          <div className="relative rounded-2xl overflow-hidden border border-[#E6E0D4] bg-[#FAF9F6]">
-            {/* eslint-disable-next-line @next/next/no-img-element */}
-            <img src={preview} alt="תצוגה מקדימה" className="w-full max-h-56 object-cover" />
-            {processing && (
-              <div className="absolute inset-0 flex items-center justify-center gap-2 bg-black/40 text-white text-sm font-medium">
-                <Loader2 className="w-4 h-4 animate-spin" />
-                מעבד תמונה...
-              </div>
-            )}
-            <button
-              type="button"
-              onClick={() => onPick(null)}
-              className="absolute top-2 left-2 bg-white/90 text-[#8C7E6A] p-2 rounded-full shadow-sm"
-            >
-              <X className="w-4 h-4" />
-            </button>
-          </div>
-        ) : (
-          <button
-            type="button"
-            onClick={() => inputRef.current?.click()}
-            className="flex flex-col items-center justify-center gap-2 py-8 rounded-2xl border border-dashed border-[#DED8CE] bg-[#FAF9F6] text-[#8C7E6A] hover:bg-[#F3EFE9]"
-          >
-            <Camera className="w-8 h-8" />
-            <span className="font-medium text-sm">צלם או בחר תמונה</span>
-          </button>
-        )}
-
-        {error && <p className="text-sm text-rose-500">{error}</p>}
 
         <div className="flex flex-col gap-2">
           <button
             type="button"
             disabled={busy || processing}
-            onClick={() => onConfirm(photo)}
+            onClick={() => onConfirm(photos)}
             className="w-full flex items-center justify-center gap-2 py-3.5 bg-[#A1C181] text-white rounded-2xl font-bold shadow-sm hover:bg-[#8eab72] disabled:opacity-60"
           >
             <CheckCircle2 className="w-5 h-5" />
-            {busy ? 'שומר...' : processing ? 'מעבד תמונה...' : photo ? 'אשר עם תמונה' : 'אשר ביצוע'}
+            {busy
+              ? 'שומר...'
+              : processing
+                ? 'מעבד תמונה...'
+                : photos.length > 1
+                  ? `אשר עם ${photos.length} תמונות`
+                  : photos.length === 1
+                    ? 'אשר עם תמונה'
+                    : 'אשר ביצוע'}
           </button>
-          {preview && (
+          {photos.length > 0 && (
             <button
               type="button"
               disabled={busy}
-              onClick={() => onConfirm(null)}
+              onClick={() => onConfirm([])}
               className="w-full flex items-center justify-center gap-2 py-3 rounded-2xl border border-[#E6E0D4] text-[#8C7E6A] font-medium hover:bg-[#F3EFE9]"
             >
               <ImagePlus className="w-4 h-4" />
               בלי תמונה
             </button>
           )}
-          {!preview && (
+          {photos.length === 0 && (
             <button
               type="button"
               disabled={busy}
-              onClick={() => onConfirm(null)}
+              onClick={() => onConfirm([])}
               className="w-full py-3 rounded-2xl border border-[#E6E0D4] text-[#8C7E6A] font-medium hover:bg-[#F3EFE9]"
             >
               בלי תמונה

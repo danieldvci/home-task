@@ -55,7 +55,8 @@
         "action": { "type": "string", "maxLength": 100 },
         "details": { "type": "string", "maxLength": 200 },
         "timestamp": { "type": "string", "maxLength": 40 },
-        "photoUrl": { "type": "string", "maxLength": 2000 },
+        "photoUrl": { "type": "string", "maxLength": 2000, "description": "First entry of photoUrls, kept for records written before multi-photo" },
+        "photoUrls": { "type": "array", "maxLength": 3, "description": "Proof photos in pick order" },
         "reactions": { "type": "object", "description": "authUid -> like | love | laugh | wow | dislike" },
         "comments": { "type": "array", "maxLength": 30 }
       },

@@ -81,12 +81,13 @@ service cloud.firestore {
 
     function isValidLog(data) {
       return data.keys().hasAll(['userId', 'action', 'details', 'timestamp'])
-        && data.keys().hasOnly(['userId', 'action', 'details', 'timestamp', 'photoUrl', 'reactions', 'comments'])
+        && data.keys().hasOnly(['userId', 'action', 'details', 'timestamp', 'photoUrl', 'photoUrls', 'reactions', 'comments'])
         && data.userId is string && data.userId.size() <= 128
         && data.action is string && data.action.size() <= 100
         && data.details is string && data.details.size() <= 200
         && data.timestamp is string && data.timestamp.size() <= 40
-        && (!data.keys().hasAny(['photoUrl']) || (data.photoUrl is string && data.photoUrl.size() <= 2000));
+        && (!data.keys().hasAny(['photoUrl']) || (data.photoUrl is string && data.photoUrl.size() <= 2000))
+        && (!data.keys().hasAny(['photoUrls']) || (data.photoUrls is list && data.photoUrls.size() <= 3));
     }
 
     // A member may only set or clear the reaction stored under their own uid,

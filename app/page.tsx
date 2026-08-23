@@ -33,7 +33,12 @@ import { motion, AnimatePresence } from 'motion/react';
 import { useAuth, useHousehold } from '../lib/hooks';
 import { db } from '../lib/firebase';
 import { collection, doc, onSnapshot, setDoc, deleteDoc, updateDoc, query, orderBy, limit, writeBatch, getDocs, where } from 'firebase/firestore';
-import { uploadTaskProof, uploadUserAvatar, validateAvatarFile } from '../lib/storage-upload';
+import {
+  MAX_PROOF_PHOTOS,
+  uploadTaskProofs,
+  uploadUserAvatar,
+  validateAvatarFile
+} from '../lib/storage-upload';
 import { Avatar } from '../components/Avatar';
 import { ReactionBar } from '../components/Reactions';
 import { COMMENTS_MAX, COMMENT_MAX_LENGTH } from '../lib/reactions';
@@ -89,10 +94,28 @@ type LogType = {
   action: string;
   details: string;
   timestamp: string;
+  /** First entry of photoUrls, kept for records written before multi-photo. */
   photoUrl?: string;
+  photoUrls?: string[];
   reactions?: Record<string, string>;
   comments?: LogComment[];
 };
+
+/** Shape of a log document as written by the client. */
+type LogWrite = {
+  userId: string;
+  action: string;
+  details: string;
+  timestamp: string;
+  photoUrl?: string;
+  photoUrls?: string[];
+};
+
+const photoLabel = (count: number) => (count > 1 ? `צורפו ${count} תמונות` : 'צורפה תמונה');
+
+/** All photos on a log, tolerating records that only carry the legacy field. */
+const logPhotos = (log: LogType) =>
+  log.photoUrls?.length ? log.photoUrls : log.photoUrl ? [log.photoUrl] : [];
 
 const MEMBER_SOFT_LIMIT = 20;
 const ADMIN_ONLY_HINT = 'רק מנהל הבית יכול לבצע פעולה זו';
@@ -414,7 +437,7 @@ export default function ChoresApp() {
   const logAction = async (action: string, details: string, photoUrl?: string) => {
     if (!householdId || !currentUserId) return;
     const logId = `l${crypto.randomUUID().split('-')[0]}`;
-    const payload: Record<string, string> = {
+    const payload: LogWrite = {
       userId: currentUserId,
       action,
       details,
@@ -535,7 +558,7 @@ export default function ChoresApp() {
     />
   );
 
-  const completeDone = async (choreId: string, photoBlob: Blob | null) => {
+  const completeDone = async (choreId: string, photoBlobs: Blob[]) => {
     if (!householdId || !currentUserId) return;
     const chore = chores.find(c => c.id === choreId);
     if (!chore) return;
@@ -587,14 +610,15 @@ export default function ChoresApp() {
           : null
       ];
       const baseDetails = `סיים/ה את "${chore.name}"`;
-      const logPayload: Record<string, string> = {
+      const logPayload: LogWrite = {
         userId: currentUserId,
         action: 'ביצוע משימה',
         details: joinDetails(baseDetails, context),
         timestamp: new Date().toISOString()
       };
 
-      if (!photoBlob) {
+      const photos = photoBlobs.slice(0, MAX_PROOF_PHOTOS);
+      if (photos.length === 0) {
         const batch = writeBatch(db);
         batch.update(choreRef, choreUpdate);
         batch.set(logRef, logPayload);
@@ -604,16 +628,19 @@ export default function ChoresApp() {
       }
 
       // Mark the chore done right away, then upload in the background. Logs are
-      // append-only in the security rules, so photoUrl has to be part of the
-      // initial write rather than patched in afterwards.
+      // append-only in the security rules, so the photo urls have to be part of
+      // the initial write rather than patched in afterwards.
       await updateDoc(choreRef, choreUpdate);
       setPendingDoneChoreId(null);
-      uploadTaskProof(householdId, logId, photoBlob)
+      uploadTaskProofs(householdId, logId, photos)
         .then(
-          (photoUrl) => ({
+          (photoUrls) => ({
             ...logPayload,
-            details: joinDetails(baseDetails, [...context, 'צורפה תמונה']),
-            photoUrl
+            details: joinDetails(baseDetails, [...context, photoLabel(photoUrls.length)]),
+            // photoUrl stays the first entry so older records and any client
+            // that predates the gallery keep rendering the same way.
+            photoUrl: photoUrls[0],
+            photoUrls
           }),
           (err) => {
             console.error(err);
@@ -1541,16 +1568,34 @@ export default function ChoresApp() {
                             {log.action}
                           </span>
                           <p className="text-sm text-[#6B5E4C] mt-1.5 leading-relaxed break-words">{log.details}</p>
-                          {log.photoUrl && (
-                            <a href={log.photoUrl} target="_blank" rel="noreferrer" className="block mt-2">
-                              {/* eslint-disable-next-line @next/next/no-img-element */}
-                              <img
-                                src={log.photoUrl}
-                                alt="הוכחת ביצוע"
-                                className="w-full max-h-40 object-cover rounded-xl border border-[#E6E0D4]"
-                              />
-                            </a>
-                          )}
+                          {(() => {
+                            const photos = logPhotos(log);
+                            if (photos.length === 0) return null;
+                            return (
+                              <div
+                                className={`mt-2 grid gap-1.5 ${photos.length > 1 ? 'grid-cols-3' : 'grid-cols-1'}`}
+                              >
+                                {photos.map((url, i) => (
+                                  <a
+                                    key={url}
+                                    href={url}
+                                    target="_blank"
+                                    rel="noreferrer"
+                                    className="block"
+                                  >
+                                    {/* eslint-disable-next-line @next/next/no-img-element */}
+                                    <img
+                                      src={url}
+                                      alt={`הוכחת ביצוע ${i + 1}`}
+                                      className={`w-full object-cover rounded-xl border border-[#E6E0D4] ${
+                                        photos.length > 1 ? 'aspect-square' : 'max-h-40'
+                                      }`}
+                                    />
+                                  </a>
+                                ))}
+                              </div>
+                            );
+                          })()}
                           {renderReactionBar(log)}
                         </div>
                       </div>
@@ -2322,7 +2367,7 @@ export default function ChoresApp() {
         <DoneConfirmModal
           choreName={pendingDoneChore.name}
           busy={actionBusy}
-          onConfirm={(file) => completeDone(pendingDoneChore.id, file)}
+          onConfirm={(photos) => completeDone(pendingDoneChore.id, photos)}
           onCancel={() => !actionBusy && setPendingDoneChoreId(null)}
         />
       )}
