@@ -270,6 +270,102 @@ export function DoneConfirmModal({ choreName, busy, onConfirm, onCancel }: Props
   );
 }
 
+/** Mirrors the `details` ceiling in firestore.rules. */
+export const MANUAL_LOG_MAX_CHARS = 200;
+
+type ManualLogProps = {
+  chores: { id: string; name: string }[];
+  busy?: boolean;
+  onConfirm: (text: string, choreId: string | null, photos: Blob[]) => void;
+  onCancel: () => void;
+};
+
+/**
+ * A free-form history entry for work done outside the rotation. It writes a
+ * log and nothing else, so it can never move a turn.
+ */
+export function ManualLogModal({ chores, busy, onConfirm, onCancel }: ManualLogProps) {
+  const [text, setText] = useState('');
+  const [choreId, setChoreId] = useState('');
+  const [photos, setPhotos] = useState<Blob[]>([]);
+  const [processing, setProcessing] = useState(false);
+
+  const trimmed = text.trim();
+  const remaining = MANUAL_LOG_MAX_CHARS - text.length;
+
+  return (
+    <div className="fixed inset-0 z-50 flex items-end sm:items-center justify-center bg-black/40 p-4">
+      <motion.div
+        initial={{ opacity: 0, y: 24 }}
+        animate={{ opacity: 1, y: 0 }}
+        className="w-full max-w-md bg-white rounded-3xl border border-[#E6E0D4] shadow-xl p-5 flex flex-col gap-4 max-h-[90vh] overflow-y-auto"
+      >
+        <div className="flex items-start justify-between gap-3">
+          <div>
+            <h3 className="text-lg font-extrabold text-[#3D3732]">רישום ליומן</h3>
+            <p className="text-sm text-[#8C7E6A] mt-1">משהו שנעשה בבית ולא קשור למשימה בתור</p>
+          </div>
+          <button
+            type="button"
+            onClick={onCancel}
+            disabled={busy}
+            className="p-2 text-[#8C7E6A] hover:bg-[#F5F1EA] rounded-full"
+          >
+            <X className="w-5 h-5" />
+          </button>
+        </div>
+
+        <div className="flex flex-col gap-1">
+          <textarea
+            value={text}
+            onChange={(e) => setText(e.target.value.slice(0, MANUAL_LOG_MAX_CHARS))}
+            disabled={busy}
+            rows={3}
+            placeholder="מה נעשה?"
+            className="w-full bg-[#FAF9F6] border border-[#E6E0D4] rounded-2xl px-4 py-3 text-sm text-[#3D3732] outline-none focus:border-[#A1C181] resize-none"
+          />
+          <span className="text-[11px] text-[#A39788] self-end">נותרו {remaining} תווים</span>
+        </div>
+
+        {chores.length > 0 && (
+          <div className="flex flex-col gap-1">
+            <label className="text-xs font-bold text-[#8C7E6A]">לשייך למשימה (לא חובה)</label>
+            <select
+              value={choreId}
+              onChange={(e) => setChoreId(e.target.value)}
+              disabled={busy}
+              className="w-full bg-white border border-[#E6E0D4] rounded-2xl px-4 py-3 text-sm font-medium text-[#6B5E4C] outline-none focus:border-[#A1C181]"
+            >
+              <option value="">ללא שיוך</option>
+              {chores.map(c => (
+                <option key={c.id} value={c.id}>{c.name}</option>
+              ))}
+            </select>
+          </div>
+        )}
+
+        <PhotoPicker
+          disabled={busy}
+          onChange={(next, isProcessing) => {
+            setPhotos(next);
+            setProcessing(isProcessing);
+          }}
+        />
+
+        <button
+          type="button"
+          disabled={busy || processing || trimmed.length === 0}
+          onClick={() => onConfirm(trimmed, choreId || null, photos)}
+          className="w-full flex items-center justify-center gap-2 py-3.5 bg-[#A1C181] text-white rounded-2xl font-bold shadow-sm hover:bg-[#8eab72] disabled:opacity-50"
+        >
+          <CheckCircle2 className="w-5 h-5" />
+          {busy ? 'שומר...' : processing ? 'מעבד תמונה...' : 'הוסף ליומן'}
+        </button>
+      </motion.div>
+    </div>
+  );
+}
+
 type SkipProps = {
   choreName: string;
   busy?: boolean;

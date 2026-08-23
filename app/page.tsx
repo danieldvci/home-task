@@ -26,7 +26,8 @@ import {
   Trophy,
   AlertTriangle,
   Loader2,
-  RotateCcw
+  RotateCcw,
+  StickyNote
 } from 'lucide-react';
 import type { LucideIcon } from 'lucide-react';
 import { motion, AnimatePresence } from 'motion/react';
@@ -43,7 +44,13 @@ import { Avatar } from '../components/Avatar';
 import { ReactionBar } from '../components/Reactions';
 import { COMMENTS_MAX, COMMENT_MAX_LENGTH } from '../lib/reactions';
 import type { LogComment, ReactionId } from '../lib/reactions';
-import { DoneConfirmModal, SkipConfirmModal, SwapTurnModal, DeleteLogConfirmModal } from '../components/TaskModals';
+import {
+  DoneConfirmModal,
+  ManualLogModal,
+  SkipConfirmModal,
+  SwapTurnModal,
+  DeleteLogConfirmModal
+} from '../components/TaskModals';
 import { WeekOverview } from '../components/WeekOverview';
 import type { WeekPerson, WeekRow } from '../components/WeekOverview';
 import { householdDisplayName, profileStorageKey } from '../lib/household-utils';
@@ -95,6 +102,8 @@ type LogType = {
   action: string;
   details: string;
   timestamp: string;
+  /** Chore this record refers to, when the writer chose to link one. */
+  choreId?: string;
   /** First entry of photoUrls, kept for records written before multi-photo. */
   photoUrl?: string;
   photoUrls?: string[];
@@ -110,7 +119,10 @@ type LogWrite = {
   timestamp: string;
   photoUrl?: string;
   photoUrls?: string[];
+  choreId?: string;
 };
+
+const MANUAL_LOG_ACTION = 'רישום ידני';
 
 const photoLabel = (count: number) => (count > 1 ? `צורפו ${count} תמונות` : 'צורפה תמונה');
 
@@ -148,7 +160,8 @@ const ACTION_STYLES: Record<string, { Icon: LucideIcon; className: string }> = {
   'יצירת משימה': { Icon: Plus, className: 'bg-[#A1C181]/20 text-[#5F7A45]' },
   'עריכת משימה': { Icon: Pencil, className: 'bg-[#8C7E6A]/20 text-[#6B5E4C]' },
   'מחיקת משימה': { Icon: Trash2, className: 'bg-rose-100 text-rose-600' },
-  'ניתוק דייר': { Icon: UserMinus, className: 'bg-rose-100 text-rose-600' }
+  'ניתוק דייר': { Icon: UserMinus, className: 'bg-rose-100 text-rose-600' },
+  [MANUAL_LOG_ACTION]: { Icon: StickyNote, className: 'bg-[#E9C46A]/25 text-[#8A6D1F]' }
 };
 const DEFAULT_ACTION_STYLE = { Icon: Activity, className: 'bg-[#F5F1EA] text-[#8C7E6A]' };
 
@@ -219,6 +232,7 @@ export default function ChoresApp() {
   const [pendingSkipChoreId, setPendingSkipChoreId] = useState<string | null>(null);
   const [pendingSwapChoreId, setPendingSwapChoreId] = useState<string | null>(null);
   const [pendingDeleteLogId, setPendingDeleteLogId] = useState<string | null>(null);
+  const [composingManualLog, setComposingManualLog] = useState(false);
   const [actionBusy, setActionBusy] = useState(false);
   const [pickingProfile, setPickingProfile] = useState(false);
   const [newHomeName, setNewHomeName] = useState('');
@@ -447,6 +461,49 @@ export default function ChoresApp() {
     if (photoUrl) payload.photoUrl = photoUrl;
     await setDoc(doc(db, 'households', householdId, 'logs', logId), payload).catch(console.error);
     return logId;
+  };
+
+  // A history-only record of work done outside the rotation. It writes a single
+  // log and touches no chore state, so it cannot affect anyone's turn.
+  const createManualLog = async (text: string, choreId: string | null, photos: Blob[]) => {
+    if (!householdId || !currentUserId) return;
+    const linkedChore = choreId ? chores.find(c => c.id === choreId) : undefined;
+    setActionBusy(true);
+    try {
+      const logId = `l${crypto.randomUUID().split('-')[0]}`;
+      const picked = photos.slice(0, MAX_PROOF_PHOTOS);
+      // Logs are append-only, so every upload has to resolve before the write.
+      let photoUrls: string[] = [];
+      if (picked.length > 0) {
+        try {
+          photoUrls = await uploadTaskProofs(householdId, logId, picked);
+        } catch (err) {
+          console.error(err);
+          showToast('העלאת התמונה נכשלה, הרישום נשמר בלי תמונות');
+        }
+      }
+      const payload: LogWrite = {
+        userId: currentUserId,
+        action: MANUAL_LOG_ACTION,
+        details: joinDetails(text, [
+          linkedChore ? `בנוגע ל"${linkedChore.name}"` : null,
+          photoUrls.length ? photoLabel(photoUrls.length) : null
+        ]),
+        timestamp: new Date().toISOString()
+      };
+      if (linkedChore) payload.choreId = linkedChore.id;
+      if (photoUrls.length) {
+        payload.photoUrl = photoUrls[0];
+        payload.photoUrls = photoUrls;
+      }
+      await setDoc(doc(db, 'households', householdId, 'logs', logId), payload);
+      setComposingManualLog(false);
+    } catch (err) {
+      console.error(err);
+      showToast('שמירת הרישום נכשלה');
+    } finally {
+      setActionBusy(false);
+    }
   };
 
   const handleDeleteLog = async (logId: string) => {
@@ -1565,10 +1622,20 @@ export default function ChoresApp() {
     return (
       <div className="flex flex-col gap-4 pb-24">
         <div className="bg-white p-6 rounded-3xl border border-[#E6E0D4] shadow-sm">
-          <h2 className="text-xl font-extrabold text-[#3D3732] mb-4 flex items-center gap-2">
-            <Activity className="w-6 h-6 text-[#A1C181]" />
-            יומן פעילות
-          </h2>
+          <div className="flex items-center justify-between gap-2 mb-4">
+            <h2 className="text-xl font-extrabold text-[#3D3732] flex items-center gap-2">
+              <Activity className="w-6 h-6 text-[#A1C181]" />
+              יומן פעילות
+            </h2>
+            <button
+              type="button"
+              onClick={() => setComposingManualLog(true)}
+              className="flex items-center gap-1.5 px-3 py-2 rounded-2xl bg-[#F3EFE9] text-[#6B5E4C] text-sm font-bold hover:bg-[#E9E3D8] transition-colors"
+            >
+              <StickyNote className="w-4 h-4" />
+              רישום ידני
+            </button>
+          </div>
 
           {logs.length === 0 ? (
             <p className="text-center text-[#8C7E6A] py-8">אין פעילויות עדיין.</p>
@@ -2436,6 +2503,14 @@ export default function ChoresApp() {
           busy={actionBusy}
           onConfirm={(targetUserId) => completeSwap(pendingSwapChore.id, targetUserId)}
           onCancel={() => !actionBusy && setPendingSwapChoreId(null)}
+        />
+      )}
+      {composingManualLog && (
+        <ManualLogModal
+          chores={chores.map(c => ({ id: c.id, name: c.name }))}
+          busy={actionBusy}
+          onConfirm={createManualLog}
+          onCancel={() => !actionBusy && setComposingManualLog(false)}
         />
       )}
       {pendingDeleteLog && (

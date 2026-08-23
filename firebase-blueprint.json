@@ -58,6 +58,7 @@
         "timestamp": { "type": "string", "maxLength": 40 },
         "photoUrl": { "type": "string", "maxLength": 2000, "description": "First entry of photoUrls, kept for records written before multi-photo" },
         "photoUrls": { "type": "array", "maxLength": 3, "description": "Proof photos in pick order" },
+        "choreId": { "type": "string", "maxLength": 128, "description": "Chore this record refers to, when one was linked" },
         "reactions": { "type": "object", "description": "authUid -> like | love | laugh | wow | dislike" },
         "comments": { "type": "array", "maxLength": 30 }
       },
