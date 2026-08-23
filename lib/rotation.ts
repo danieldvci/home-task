@@ -17,6 +17,9 @@ export type ChoreCompletion = {
   userId: string;
   logId?: string | null;
   at: string;
+  // A skipped day is resolved but not done: the turn moved past `userId` and
+  // the occurrence stays open for whoever comes next.
+  skipped?: boolean;
 };
 
 export type Chore = {
@@ -31,6 +34,9 @@ export type Chore = {
   // Most recent completion only; `completions` is the per-day source of truth.
   lastCompletedLogId?: string | null;
   completions?: Record<string, ChoreCompletion>;
+  // Day the schedule counts from, set once at creation. Without it a weekly
+  // chore has nothing stable to repeat from.
+  anchorDate?: string | null;
 };
 
 // Structural subset of the app's UserType, so any richer profile works here.
@@ -110,11 +116,22 @@ export const absenceWindowLabel = (user: RotationUser, locale = 'he-IL') => {
 
 // --- Schedule --------------------------------------------------------------
 
-export const choreOccursOnDate = (chore: Chore, date: Date, anchorDate: Date) => {
+// The day a weekly schedule repeats from. Chores created before `anchorDate`
+// existed fall back to their last completion, then to the caller's reference
+// day, which is the pre-anchor behaviour.
+export const choreAnchorDate = (chore: Chore, fallback: Date) => {
+  const explicit = parseTime(chore.anchorDate);
+  if (explicit !== null) return normalizeDay(new Date(explicit));
+  const lastCompleted = parseTime(chore.lastCompletedAt);
+  if (lastCompleted !== null) return normalizeDay(new Date(lastCompleted));
+  return normalizeDay(fallback);
+};
+
+export const choreOccursOnDate = (chore: Chore, date: Date, fallbackAnchor: Date) => {
   if (chore.frequency === 'daily') return true;
   if (chore.frequency === 'custom_days') return !!chore.customDays?.includes(date.getDay());
   const d = normalizeDay(date).getTime();
-  const a = normalizeDay(anchorDate).getTime();
+  const a = choreAnchorDate(chore, fallbackAnchor).getTime();
   const diffDays = Math.round(Math.abs(d - a) / MS_PER_DAY);
   return diffDays % 7 === 0;
 };
@@ -122,7 +139,12 @@ export const choreOccursOnDate = (chore: Chore, date: Date, anchorDate: Date) =>
 // Occurrence days between two dates, excluding `startDate` and including
 // `endDate`, ordered from nearest to furthest. Walking backwards returns the
 // days in reverse-chronological order.
-export const listOccurrenceDates = (chore: Chore, startDate: Date, endDate: Date) => {
+export const listOccurrenceDates = (
+  chore: Chore,
+  startDate: Date,
+  endDate: Date,
+  fallbackAnchor?: Date
+) => {
   const dates: Date[] = [];
   const start = normalizeDay(startDate);
   const end = normalizeDay(endDate);
@@ -139,17 +161,7 @@ export const listOccurrenceDates = (chore: Chore, startDate: Date, endDate: Date
     current.setDate(current.getDate() + direction);
     current.setHours(0, 0, 0, 0); // Re-normalize to midnight to avoid DST issues
 
-    let occurs = false;
-    if (chore.frequency === 'daily') {
-      occurs = true;
-    } else if (chore.frequency === 'custom_days') {
-      occurs = !!chore.customDays?.includes(current.getDay());
-    } else if (chore.frequency === 'weekly') {
-      const diff = Math.abs(current.getTime() - start.getTime()) / MS_PER_DAY;
-      occurs = Math.round(diff) % 7 === 0;
-    }
-
-    if (occurs) dates.push(new Date(current));
+    if (choreOccursOnDate(chore, current, fallbackAnchor ?? start)) dates.push(new Date(current));
   }
 
   return dates;
@@ -240,13 +252,22 @@ export type ResolvedCompletion = {
   // True for chores written before `completions` existed: we know the day was
   // done but not by whom.
   inferred: boolean;
+  skipped: boolean;
 };
 
-export const getCompletion = (chore: Chore, day: Date): ResolvedCompletion | null => {
+// Any recorded outcome for the day, completed or skipped.
+export const getDayRecord = (chore: Chore, day: Date): ResolvedCompletion | null => {
   const key = dayKey(day);
   const entry = chore.completions?.[key];
   if (entry && typeof entry.userId === 'string') {
-    return { key, userId: entry.userId, logId: entry.logId ?? null, at: entry.at ?? null, inferred: false };
+    return {
+      key,
+      userId: entry.userId,
+      logId: entry.logId ?? null,
+      at: entry.at ?? null,
+      inferred: false,
+      skipped: !!entry.skipped
+    };
   }
   // Once a chore carries a completions map it is the only source of truth;
   // lastCompletedAt is just a denormalised copy of its newest entry.
@@ -257,10 +278,17 @@ export const getCompletion = (chore: Chore, day: Date): ResolvedCompletion | nul
       userId: null,
       logId: chore.lastCompletedLogId ?? null,
       at: chore.lastCompletedAt,
-      inferred: true
+      inferred: true,
+      skipped: false
     };
   }
   return null;
+};
+
+/** Only days that were actually completed; a skipped day is still open. */
+export const getCompletion = (chore: Chore, day: Date): ResolvedCompletion | null => {
+  const record = getDayRecord(chore, day);
+  return record && !record.skipped ? record : null;
 };
 
 export const isDoneOnDay = (chore: Chore, day: Date) => getCompletion(chore, day) !== null;
@@ -305,7 +333,9 @@ export const dayKeyToDate = (key: string) => {
 // indicator and for readers that predate the map; keep them pointing at the
 // newest entry so the two representations can never disagree.
 export const completionMarkers = (completions: Record<string, ChoreCompletion>) => {
-  const keys = Object.keys(completions).sort();
+  const keys = Object.keys(completions)
+    .filter(key => !completions[key].skipped)
+    .sort();
   const newest = keys[keys.length - 1];
   if (!newest) return { lastCompletedAt: null, lastCompletedLogId: null };
   return {
@@ -334,11 +364,25 @@ export const projectAssigneeIndex = (
   const forward = normalizeDay(fromDay).getTime() <= normalizeDay(toDay).getTime();
   let index = -1;
 
-  for (const day of [normalizeDay(fromDay), ...listOccurrenceDates(chore, fromDay, toDay)]) {
-    const completion = getCompletion(chore, day);
-    if (completion) {
-      const frozen = completion.userId ? chore.rotation.indexOf(completion.userId) : -1;
-      if (frozen >= 0) index = frozen;
+  // `fromDay` only takes a turn when the chore actually falls on it, otherwise
+  // a weekly chore consulted on an off day would burn an extra turn.
+  const days = [
+    ...(choreOccursOnDate(chore, fromDay, fromDay) ? [normalizeDay(fromDay)] : []),
+    ...listOccurrenceDates(chore, fromDay, toDay, fromDay)
+  ];
+
+  for (const day of days) {
+    const record = getDayRecord(chore, day);
+    if (record) {
+      const recorded = record.userId ? chore.rotation.indexOf(record.userId) : -1;
+      // A skip resolves the day onto the next available resident and, like a
+      // completion, takes no turn of its own: the pointer already moved.
+      if (record.skipped) {
+        if (recorded >= 0) index = getActiveAssigneeIndex(chore, users, recorded + 1, day);
+        else if (index === -1) index = getActiveAssigneeIndex(chore, users, startIndex, day);
+      } else if (recorded >= 0) {
+        index = recorded;
+      }
       continue;
     }
     if (index === -1) index = getActiveAssigneeIndex(chore, users, startIndex, day);
@@ -347,6 +391,21 @@ export const projectAssigneeIndex = (
   }
 
   return index === -1 ? getActiveAssigneeIndex(chore, users, startIndex, toDay) : index;
+};
+
+/**
+ * True when nobody in the rotation can take the chore on that day, either
+ * because they are away or because they no longer have a profile. The pointer
+ * still lands on someone, so callers have to check this to avoid presenting an
+ * absent resident as the assignee.
+ */
+export const isEveryoneAwayOnDay = (chore: Chore, users: RotationUser[], day: Date) => {
+  const rotation = chore.rotation ?? [];
+  if (rotation.length === 0) return false;
+  return rotation.every(id => {
+    const user = users.find(u => u.id === id);
+    return !user || isUserAbsentOnDay(user, day);
+  });
 };
 
 export type DayAssignment = {
@@ -360,6 +419,10 @@ export type DayAssignment = {
   // A completion recovered from the legacy single marker, so `completedBy` is
   // a best guess rather than a recorded fact.
   inferred: boolean;
+  // Resident whose turn was skipped on this day, if any.
+  skippedBy: string | null;
+  // Nobody in the rotation is available, so `userId` is a placeholder.
+  everyoneAway: boolean;
 };
 
 // The single entry point for "who owns this chore on this day".
@@ -369,7 +432,8 @@ export const resolveDayAssignee = (
   day: Date,
   today: Date = new Date()
 ): DayAssignment => {
-  const completion = getCompletion(chore, day);
+  const record = getDayRecord(chore, day);
+  const completion = record && !record.skipped ? record : null;
 
   if (completion && completion.userId) {
     const index = chore.rotation?.indexOf(completion.userId) ?? -1;
@@ -380,7 +444,9 @@ export const resolveDayAssignee = (
       done: true,
       completedBy: completion.userId,
       logId: completion.logId,
-      inferred: false
+      inferred: false,
+      skippedBy: null,
+      everyoneAway: false
     };
   }
 
@@ -396,7 +462,9 @@ export const resolveDayAssignee = (
       done: true,
       completedBy: chore.rotation?.[index] ?? null,
       logId: completion.logId,
-      inferred: true
+      inferred: true,
+      skippedBy: null,
+      everyoneAway: false
     };
   }
 
@@ -408,6 +476,8 @@ export const resolveDayAssignee = (
     done: false,
     completedBy: null,
     logId: null,
-    inferred: false
+    inferred: false,
+    skippedBy: record?.skipped ? record.userId : null,
+    everyoneAway: isEveryoneAwayOnDay(chore, users, day)
   };
 };

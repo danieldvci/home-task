@@ -62,9 +62,11 @@ service cloud.firestore {
       // Rules cannot iterate map values, so only the shape of the map itself is
       // checked here; entry contents are written by the client.
       let hasCompletions = data.keys().hasAny(['completions']);
+      // Day a weekly schedule repeats from; fixed when the chore is created.
+      let hasAnchor = data.keys().hasAny(['anchorDate']);
       let baseSize = 4;
       let totalSize = baseSize + (hasCustom ? 1 : 0) + (hasLastComp ? 1 : 0) + (hasCategory ? 1 : 0)
-        + (hasLastLog ? 1 : 0) + (hasCompletions ? 1 : 0);
+        + (hasLastLog ? 1 : 0) + (hasCompletions ? 1 : 0) + (hasAnchor ? 1 : 0);
 
       return data.keys().hasAll(['name', 'frequency', 'rotation', 'currentIndex'])
         && data.keys().size() == totalSize
@@ -76,7 +78,8 @@ service cloud.firestore {
         && (!hasLastComp || (data.lastCompletedAt == null || (data.lastCompletedAt is string && data.lastCompletedAt.size() <= 40)))
         && (!hasCategory || (data.category is string && data.category.size() <= 40))
         && (!hasLastLog || (data.lastCompletedLogId == null || (data.lastCompletedLogId is string && data.lastCompletedLogId.size() <= 128)))
-        && (!hasCompletions || (data.completions is map && data.completions.size() <= 400));
+        && (!hasCompletions || (data.completions is map && data.completions.size() <= 400))
+        && (!hasAnchor || (data.anchorDate == null || (data.anchorDate is string && data.anchorDate.size() <= 40)));
     }
 
     function isValidLog(data) {

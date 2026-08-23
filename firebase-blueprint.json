@@ -41,8 +41,9 @@
         "completions": {
           "type": "object",
           "maxLength": 400,
-          "description": "YYYY-MM-DD -> { userId, logId, at }; freezes each completed occurrence to the resident who did it"
-        }
+          "description": "YYYY-MM-DD -> { userId, logId, at, skipped? }; freezes each resolved occurrence to the resident who did it, or who was skipped"
+        },
+        "anchorDate": { "type": "string", "maxLength": 40, "description": "Day a weekly schedule repeats from, fixed at creation" }
       },
       "required": ["name", "frequency", "rotation", "currentIndex"]
     },

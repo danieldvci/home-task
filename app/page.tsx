@@ -50,6 +50,7 @@ import { householdDisplayName, profileStorageKey } from '../lib/household-utils'
 import { describeChoreChanges, frequencyLabel, joinDetails, clampDetails } from '../lib/activity';
 import {
   absenceWindowLabel,
+  choreAnchorDate,
   choreOccursOnDate,
   completionMarkers,
   getActiveAssigneeIndex,
@@ -698,17 +699,36 @@ export default function ChoresApp() {
     if (!householdId || !isAdmin) return;
     const chore = chores.find(c => c.id === choreId);
     if (!chore) return;
+    // Skip the day being viewed, not "today", so a skip matches what the card
+    // showed. The day stays open; only the turn moves on.
+    const assignment = resolveDayAssignee(chore, users, selectedDate, today);
+    if (assignment.done) {
+      showToast('המשימה כבר סומנה כבוצעה ליום זה');
+      return;
+    }
+    const skippedUserId = assignment.userId;
+    if (!skippedUserId) return;
+    const isFutureDay = normalizeDay(selectedDate).getTime() > normalizeDay(today).getTime();
     setActionBusy(true);
     try {
-      const activeIdx = getActiveAssigneeIndex(chore, users, chore.currentIndex, today);
-      const nextIdx = getNextActiveIndex(chore, users, activeIdx, today);
+      const nextIdx = getNextActiveIndex(chore, users, assignment.index, selectedDate);
+      // Recorded so the skipped day cannot be projected back onto the person
+      // whose turn was passed over. A skip is not a completion, so the
+      // lastCompletedAt markers deliberately stay untouched.
+      const completions = withCompletion(
+        chore,
+        selectedDate,
+        { userId: skippedUserId, at: new Date().toISOString(), skipped: true },
+        today
+      );
       await updateDoc(doc(db, 'households', householdId, 'chores', choreId), {
-        currentIndex: nextIdx
+        currentIndex: isFutureDay ? chore.currentIndex : nextIdx,
+        completions
       });
       await logAction(
         'דילוג משימה',
         joinDetails(`דילג/ה על "${chore.name}"`, [
-          `התור עובר מ${nameOf(chore.rotation[activeIdx])} ל${nameOf(chore.rotation[nextIdx])}`
+          `התור עובר מ${nameOf(skippedUserId)} ל${nameOf(chore.rotation[nextIdx])}`
         ])
       );
       setPendingSkipChoreId(null);
@@ -956,7 +976,16 @@ export default function ChoresApp() {
     // Re-point currentIndex at whoever currently holds the turn, since editing
     // can reorder/add/remove rotation members and the old numeric index would
     // otherwise silently land on a different person (or go out of bounds).
-    const currentTurnUserId = existingChore?.rotation?.[existingChore.currentIndex];
+    // The stored pointer can itself be out of range on documents written by
+    // older versions, and the rest of the queue reads it wrapped, so wrap here
+    // too instead of dropping the turn back to the first resident.
+    const currentTurnUserId = existingChore?.rotation?.length
+      ? existingChore.rotation[
+          ((existingChore.currentIndex % existingChore.rotation.length) +
+            existingChore.rotation.length) %
+            existingChore.rotation.length
+        ]
+      : undefined;
     const reindexedCurrentIndex = currentTurnUserId ? newChoreUsers.indexOf(currentTurnUserId) : -1;
     const choreData = {
       name: newChoreName.trim(),
@@ -965,9 +994,15 @@ export default function ChoresApp() {
       category: newChoreCategory || null,
       rotation: newChoreUsers,
       currentIndex: editingChoreId ? (reindexedCurrentIndex >= 0 ? reindexedCurrentIndex : 0) : 0,
-      lastCompletedAt: editingChoreId ? (existingChore?.lastCompletedAt || null) : null
+      lastCompletedAt: editingChoreId ? (existingChore?.lastCompletedAt || null) : null,
+      // The day a weekly schedule repeats from. Fixed at creation and carried
+      // through edits, so changing the chore never shifts its schedule.
+      anchorDate:
+        editingChoreId && existingChore
+          ? choreAnchorDate(existingChore, today).toISOString()
+          : normalizeDay(today).toISOString()
     };
-    
+
     // Clean up nulls for firestore strict rules if needed, though blueprint accepts them
     if (!choreData.customDays) delete (choreData as any).customDays;
     if (!choreData.category) delete (choreData as any).category;
@@ -1373,13 +1408,23 @@ export default function ChoresApp() {
                             <AlertTriangle className="w-3 h-3" /> באיחור
                           </span>
                         )}
+                        {assignment.skippedBy && (
+                          <span className="inline-flex items-center gap-1 text-[10px] font-bold text-[#8C7E6A] bg-[#F1ECE3] px-2 py-0.5 rounded-full">
+                            <FastForward className="w-3 h-3" /> דולג {nameOf(assignment.skippedBy)}
+                          </span>
+                        )}
                       </div>
                       <p className="text-xs text-[#A39788] mt-1">
                         {chore.frequency === 'daily' ? 'יומי' : chore.frequency === 'weekly' ? 'שבועי' : 'ימים ספציפיים'}
                         {chore.category ? ` · ${chore.category}` : ''}
                       </p>
                     </div>
-                    {assignee && (
+                    {assignment.everyoneAway ? (
+                      <div className="flex items-center gap-2 px-3 py-1.5 rounded-full bg-[#F1ECE3] text-[#8C7E6A]">
+                        <UserX className="w-4 h-4" />
+                        <span className="text-sm font-bold">אין דייר זמין</span>
+                      </div>
+                    ) : assignee && (
                       <div className={`flex flex-col items-end gap-1`}>
                         {chore.rotation && chore.rotation.length > 1 ? (
                           <div className={`flex items-center gap-1.5 px-3 py-1.5 rounded-3xl ${done ? 'opacity-50' : 'bg-[#F3EFE9]'}`}>
@@ -1442,6 +1487,11 @@ export default function ChoresApp() {
                         )}
                       </div>
                       {completionLog && renderReactionBar(completionLog)}
+                    </div>
+                  ) : assignment.everyoneAway ? (
+                    <div className="flex items-center justify-center gap-2 py-3 px-4 bg-[#F5F1EA] rounded-2xl text-sm font-medium text-[#8C7E6A]">
+                      <UserX className="w-4 h-4" />
+                      כל הדיירים בסבב נעדרים ביום זה
                     </div>
                   ) : canMarkDone ? (
                     <div className="flex gap-2">

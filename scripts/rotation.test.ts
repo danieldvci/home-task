@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict';
 import {
+  choreOccursOnDate,
   completionMarkers,
   dayKey,
   getActiveAssigneeIndex,
@@ -7,6 +8,7 @@ import {
   getOccurrencesBetween,
   getPrevActiveIndex,
   isDoneOnDay,
+  isEveryoneAwayOnDay,
   isUserAbsentNow,
   isUserAbsentOnDay,
   listOccurrenceDates,
@@ -224,6 +226,116 @@ const trio = [present('u1'), present('u2'), present('u3')];
   const stale = { [dayKey(old)]: { userId: 'u1', logId: 'l0', at: old.toISOString() } };
   const pruned = withCompletion({ ...chore, completions: stale }, TUE, { userId: 'u1', logId: 'l1', at: TUE.toISOString() }, TUE);
   assert.deepEqual(Object.keys(pruned), [dayKey(TUE)], 'entries older than the retention window are pruned');
+}
+
+// --- Weekly chores repeat from their anchor, not from today ----------------
+
+{
+  const anchored = makeChore({ frequency: 'weekly', anchorDate: MON.toISOString() });
+  const nextMon = new Date(2026, 7, 24, 12, 0, 0);
+
+  assert.equal(choreOccursOnDate(anchored, MON, THU), true, 'the anchor day itself occurs');
+  assert.equal(choreOccursOnDate(anchored, TUE, TUE), false, 'a weekly chore is not due every day');
+  assert.equal(choreOccursOnDate(anchored, nextMon, TUE), true, 'it comes back seven days later');
+  assert.deepEqual(
+    listOccurrenceDates(anchored, TUE, new Date(2026, 8, 1, 12, 0, 0)).map(dayKey),
+    [dayKey(nextMon), dayKey(new Date(2026, 7, 31, 12, 0, 0))],
+    'occurrence days follow the anchor'
+  );
+
+  // Chores created before anchorDate existed keep a stable schedule by falling
+  // back to their last completion.
+  const byLastCompleted = makeChore({ frequency: 'weekly', lastCompletedAt: MON.toISOString() });
+  assert.equal(choreOccursOnDate(byLastCompleted, MON, THU), true, 'falls back to the last completion');
+  assert.equal(choreOccursOnDate(byLastCompleted, TUE, TUE), false);
+
+  const unanchored = makeChore({ frequency: 'weekly' });
+  assert.equal(choreOccursOnDate(unanchored, TUE, TUE), true, 'with nothing to anchor to, today is the anchor');
+
+  // Consulting a weekly chore on an off day must not burn a turn: the next
+  // occurrence still belongs to whoever the pointer names.
+  assert.equal(
+    resolveDayAssignee(anchored, trio, nextMon, TUE).userId,
+    'u1',
+    'the next weekly occurrence belongs to the current pointer'
+  );
+  assert.equal(
+    resolveDayAssignee(anchored, trio, new Date(2026, 7, 31, 12, 0, 0), TUE).userId,
+    'u2',
+    'the occurrence after that moves one place on'
+  );
+}
+
+// --- A skipped day is recorded, resolved, and not a completion -------------
+
+{
+  // The admin skipped u1 on Tuesday, so the pointer moved to u2 and Tuesday is
+  // still open for u2.
+  const completions = { [dayKey(TUE)]: { userId: 'u1', at: TUE.toISOString(), skipped: true } };
+  const chore = makeChore({ currentIndex: 1, completions });
+
+  const tuesday = resolveDayAssignee(chore, trio, TUE, TUE);
+  assert.equal(tuesday.done, false, 'a skip is not a completion');
+  assert.equal(tuesday.skippedBy, 'u1', 'the skipped resident is recorded');
+  assert.equal(tuesday.userId, 'u2', 'the day passes to the next resident');
+  assert.equal(isDoneOnDay(chore, TUE), false);
+
+  assert.equal(resolveDayAssignee(chore, trio, WED, TUE).userId, 'u3', 'Wednesday carries on from the skip');
+  assert.equal(
+    completionMarkers(completions).lastCompletedAt,
+    null,
+    'a skip never counts as the last completion'
+  );
+
+  // Completing the skipped day afterwards overwrites the skip entry.
+  const done = withCompletion(chore, TUE, { userId: 'u2', logId: 'l2', at: TUE.toISOString() }, TUE);
+  const completed = makeChore({ currentIndex: 2, completions: done });
+  assert.equal(resolveDayAssignee(completed, trio, TUE, TUE).done, true);
+  assert.equal(resolveDayAssignee(completed, trio, TUE, TUE).completedBy, 'u2');
+}
+
+// --- Nobody available ------------------------------------------------------
+
+{
+  const chore = makeChore();
+  const allAway = trio.map(u => ({
+    ...u,
+    absentFrom: at(WED, 0).toISOString(),
+    absentUntil: at(WED, 23).toISOString()
+  }));
+  assert.equal(isEveryoneAwayOnDay(chore, allAway, WED), true, 'every resident is away');
+  assert.equal(isEveryoneAwayOnDay(chore, allAway, TUE), false, 'the day before is fine');
+  assert.equal(resolveDayAssignee(chore, allAway, WED, TUE).everyoneAway, true, 'the assignment says so');
+  assert.equal(resolveDayAssignee(chore, trio, WED, TUE).everyoneAway, false);
+  assert.equal(
+    isEveryoneAwayOnDay(makeChore({ rotation: ['ghost'] }), trio, TUE),
+    true,
+    'a rotation member with no profile is not available either'
+  );
+  assert.equal(isEveryoneAwayOnDay(makeChore({ rotation: [] }), trio, TUE), false, 'an empty rotation is not "away"');
+}
+
+// --- Freeze policy ---------------------------------------------------------
+// Pinned per product decision: a completion belongs to whoever was recorded,
+// undo is theirs (or an admin's), and undoing hands the turn back to them.
+
+{
+  const completions = { [dayKey(TUE)]: { userId: 'u1', logId: 'l1', at: TUE.toISOString() } };
+  const chore = makeChore({ currentIndex: 1, completions, ...completionMarkers(completions) });
+
+  // Reordering the rotation or moving the pointer cannot transfer the credit.
+  const reordered = makeChore({ rotation: ['u3', 'u2', 'u1'], currentIndex: 0, completions });
+  assert.equal(resolveDayAssignee(reordered, trio, TUE, TUE).completedBy, 'u1', 'credit survives a reorder');
+  assert.equal(resolveDayAssignee(reordered, trio, TUE, TUE).index, 2, 'the index tracks the completer');
+
+  // Undo restores the turn to the completer and reopens the day.
+  const restored = makeChore({
+    currentIndex: resolveDayAssignee(chore, trio, TUE, TUE).index,
+    completions: withoutCompletion(chore, TUE, TUE)
+  });
+  const reopened = resolveDayAssignee(restored, trio, TUE, TUE);
+  assert.equal(reopened.done, false, 'the day is open again');
+  assert.equal(reopened.userId, 'u1', 'and the turn is back with the completer');
 }
 
 console.log('rotation tests passed');
