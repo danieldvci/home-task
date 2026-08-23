@@ -1,7 +1,7 @@
 'use client';
 
 import React, { useEffect, useRef, useState } from 'react';
-import { Camera, CheckCircle2, X, ImagePlus, Repeat, Loader2, Trash2 } from 'lucide-react';
+import { Camera, CheckCircle2, X, ImagePlus, Plus, Repeat, Loader2, Trash2 } from 'lucide-react';
 import { motion } from 'motion/react';
 import { Avatar } from './Avatar';
 import { compressImage } from '../lib/image';
@@ -265,6 +265,103 @@ export function DoneConfirmModal({ choreName, busy, onConfirm, onCancel }: Props
             </button>
           )}
         </div>
+      </motion.div>
+    </div>
+  );
+}
+
+type QuickTaskCandidate = { id: string; name: string; color: string; photoURL?: string | null };
+
+type QuickTaskProps = {
+  /** Prefilled name, usually the chore this extra round comes from. */
+  defaultName: string;
+  dateLabel: string;
+  candidates: QuickTaskCandidate[];
+  defaultAssigneeId?: string | null;
+  busy?: boolean;
+  onConfirm: (name: string, assigneeId: string) => void;
+  onCancel: () => void;
+};
+
+/**
+ * An extra round of a chore for one day only. It becomes its own chore with a
+ * one-person rotation, so it never touches the pointer of the chore it came
+ * from.
+ */
+export function QuickTaskModal({
+  defaultName,
+  dateLabel,
+  candidates,
+  defaultAssigneeId,
+  busy,
+  onConfirm,
+  onCancel
+}: QuickTaskProps) {
+  const [name, setName] = useState(defaultName);
+  const [assigneeId, setAssigneeId] = useState(defaultAssigneeId || candidates[0]?.id || '');
+  const trimmed = name.trim();
+
+  return (
+    <div className="fixed inset-0 z-50 flex items-end sm:items-center justify-center bg-black/40 p-4">
+      <motion.div
+        initial={{ opacity: 0, y: 24 }}
+        animate={{ opacity: 1, y: 0 }}
+        className="w-full max-w-md bg-white rounded-3xl border border-[#E6E0D4] shadow-xl p-5 flex flex-col gap-4 max-h-[90vh] overflow-y-auto"
+      >
+        <div className="flex items-start justify-between gap-3">
+          <div>
+            <h3 className="text-lg font-extrabold text-[#3D3732]">עוד פעם אחת</h3>
+            <p className="text-sm text-[#8C7E6A] mt-1">משימה חד פעמית ל{dateLabel}, בלי לשנות את הסבב</p>
+          </div>
+          <button
+            type="button"
+            onClick={onCancel}
+            disabled={busy}
+            className="p-2 text-[#8C7E6A] hover:bg-[#F5F1EA] rounded-full"
+          >
+            <X className="w-5 h-5" />
+          </button>
+        </div>
+
+        <input
+          value={name}
+          onChange={(e) => setName(e.target.value.slice(0, 100))}
+          disabled={busy}
+          placeholder="שם המשימה"
+          className="w-full bg-[#FAF9F6] border border-[#E6E0D4] rounded-2xl px-4 py-3 text-sm text-[#3D3732] outline-none focus:border-[#A1C181]"
+        />
+
+        <div className="flex flex-col gap-2">
+          <span className="text-xs font-bold text-[#8C7E6A]">מי מבצע?</span>
+          <div className="flex flex-wrap gap-2">
+            {candidates.map(c => (
+              <button
+                key={c.id}
+                type="button"
+                onClick={() => setAssigneeId(c.id)}
+                disabled={busy}
+                className={`flex items-center gap-2 px-3 py-2 rounded-2xl border transition-all ${
+                  assigneeId === c.id
+                    ? 'bg-white border-[#A1C181] ring-1 ring-[#A1C181]/50'
+                    : 'bg-white border-[#E6E0D4] opacity-70 hover:opacity-100'
+                }`}
+              >
+                <Avatar name={c.name} color={c.color} photoURL={c.photoURL} size="sm" />
+                <span className="text-sm font-medium text-[#3D3732]">{c.name}</span>
+              </button>
+            ))}
+          </div>
+        </div>
+
+        <button
+          type="button"
+          disabled={busy || !trimmed || !assigneeId}
+          onClick={() => onConfirm(trimmed, assigneeId)}
+          className="w-full flex items-center justify-center gap-2 py-3.5 bg-[#A1C181] text-white rounded-2xl font-bold shadow-sm hover:bg-[#8eab72] disabled:opacity-50"
+        >
+          <Plus className="w-5 h-5" />
+          {busy ? 'מוסיף...' : 'הוסף משימה'}
+        </button>
       </motion.div>
     </div>
   );

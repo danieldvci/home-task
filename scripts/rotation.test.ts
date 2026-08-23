@@ -315,6 +315,45 @@ const trio = [present('u1'), present('u2'), present('u3')];
   assert.equal(isEveryoneAwayOnDay(makeChore({ rotation: [] }), trio, TUE), false, 'an empty rotation is not "away"');
 }
 
+// --- One-off tasks ---------------------------------------------------------
+
+{
+  const once = makeChore({
+    id: 'c-once',
+    frequency: 'once',
+    onceDate: WED.toISOString(),
+    rotation: ['u2'],
+    currentIndex: 0
+  });
+
+  assert.equal(choreOccursOnDate(once, WED, TUE), true, 'a one-off occurs on its day');
+  assert.equal(choreOccursOnDate(once, TUE, TUE), false, 'and on no other day');
+  assert.equal(choreOccursOnDate(once, THU, THU), false, 'not even once its day has passed');
+  assert.deepEqual(
+    listOccurrenceDates(once, TUE, FRI).map(dayKey),
+    [dayKey(WED)],
+    'exactly one occurrence'
+  );
+  assert.equal(
+    choreOccursOnDate(makeChore({ frequency: 'once' }), TUE, TUE),
+    false,
+    'a one-off with no day never occurs'
+  );
+
+  const day = resolveDayAssignee(once, trio, WED, TUE);
+  assert.equal(day.userId, 'u2', 'the single rotation member owns it');
+  assert.equal(day.done, false);
+
+  // The regular completion path applies unchanged.
+  const completed = {
+    ...once,
+    completions: withCompletion(once, WED, { userId: 'u2', logId: 'l7', at: WED.toISOString() }, WED)
+  };
+  const after = resolveDayAssignee(completed, trio, WED, TUE);
+  assert.equal(after.done, true, 'it completes like any other chore');
+  assert.equal(after.completedBy, 'u2');
+}
+
 // --- Freeze policy ---------------------------------------------------------
 // Pinned per product decision: a completion belongs to whoever was recorded,
 // undo is theirs (or an admin's), and undoing hands the turn back to them.

@@ -1,4 +1,4 @@
-export type ChoreFrequency = 'daily' | 'weekly' | 'custom_days';
+export type ChoreFrequency = 'daily' | 'weekly' | 'custom_days' | 'once';
 
 /** The parts of a chore that are worth describing in the activity log. */
 export type ChoreSnapshot = {
@@ -17,6 +17,7 @@ const LOG_DETAILS_MAX = 200;
 export function frequencyLabel(frequency: ChoreFrequency, customDays?: number[] | null): string {
   if (frequency === 'daily') return 'יומי';
   if (frequency === 'weekly') return 'שבועי';
+  if (frequency === 'once') return 'חד פעמי';
   const days = [...(customDays || [])]
     .sort((a, b) => a - b)
     .map((d) => WEEKDAY_LETTERS[d])

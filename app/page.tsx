@@ -47,6 +47,7 @@ import type { LogComment, ReactionId } from '../lib/reactions';
 import {
   DoneConfirmModal,
   ManualLogModal,
+  QuickTaskModal,
   SkipConfirmModal,
   SwapTurnModal,
   DeleteLogConfirmModal
@@ -55,6 +56,7 @@ import { WeekOverview } from '../components/WeekOverview';
 import type { WeekPerson, WeekRow } from '../components/WeekOverview';
 import { householdDisplayName, profileStorageKey } from '../lib/household-utils';
 import { describeChoreChanges, frequencyLabel, joinDetails, clampDetails } from '../lib/activity';
+import type { ChoreFrequency } from '../lib/activity';
 import {
   absenceWindowLabel,
   choreAnchorDate,
@@ -223,7 +225,7 @@ export default function ChoresApp() {
   const [isAddingChore, setIsAddingChore] = useState(false);
   const [editingChoreId, setEditingChoreId] = useState<string | null>(null);
   const [newChoreName, setNewChoreName] = useState('');
-  const [newChoreFreq, setNewChoreFreq] = useState<'daily' | 'weekly' | 'custom_days'>('daily');
+  const [newChoreFreq, setNewChoreFreq] = useState<ChoreFrequency>('daily');
   const [newChoreCustomDays, setNewChoreCustomDays] = useState<number[]>([]);
   const [newChoreUsers, setNewChoreUsers] = useState<string[]>([]);
   const [newChoreCategory, setNewChoreCategory] = useState<string>('');
@@ -233,6 +235,7 @@ export default function ChoresApp() {
   const [pendingSwapChoreId, setPendingSwapChoreId] = useState<string | null>(null);
   const [pendingDeleteLogId, setPendingDeleteLogId] = useState<string | null>(null);
   const [composingManualLog, setComposingManualLog] = useState(false);
+  const [quickTaskSourceId, setQuickTaskSourceId] = useState<string | null>(null);
   const [actionBusy, setActionBusy] = useState(false);
   const [pickingProfile, setPickingProfile] = useState(false);
   const [newHomeName, setNewHomeName] = useState('');
@@ -992,6 +995,43 @@ export default function ChoresApp() {
     }
   };
 
+  // An extra round of a chore for one day. It is a chore of its own with a
+  // single-person rotation, so the source chore's pointer is untouched and the
+  // whole completion, photo and undo path works without any special casing.
+  const createOnceTask = async (name: string, assigneeId: string) => {
+    if (!isAdmin || !householdId) return;
+    const source = quickTaskSource;
+    const onceDate = normalizeDay(selectedDate).toISOString();
+    setActionBusy(true);
+    try {
+      const cid = `c${crypto.randomUUID().split('-')[0]}`;
+      const choreData: Record<string, unknown> = {
+        name,
+        frequency: 'once',
+        onceDate,
+        rotation: [assigneeId],
+        currentIndex: 0,
+        lastCompletedAt: null,
+        anchorDate: onceDate
+      };
+      if (source?.category) choreData.category = source.category;
+      await setDoc(doc(db, 'households', householdId, 'chores', cid), choreData);
+      await logAction(
+        'יצירת משימה',
+        joinDetails(`הוסיף/ה משימה חד פעמית: "${name}"`, [
+          selectedDate.toLocaleDateString('he-IL', { day: '2-digit', month: '2-digit' }),
+          `אחראי/ת: ${nameOf(assigneeId)}`
+        ])
+      );
+      setQuickTaskSourceId(null);
+    } catch (err) {
+      console.error(err);
+      showToast('הוספת המשימה נכשלה');
+    } finally {
+      setActionBusy(false);
+    }
+  };
+
   const handleDeleteChore = async (choreId: string) => {
     if (!isAdmin || !householdId) return;
     const chore = chores.find(c => c.id === choreId);
@@ -1048,6 +1088,9 @@ export default function ChoresApp() {
       name: newChoreName.trim(),
       frequency: newChoreFreq,
       customDays: newChoreFreq === 'custom_days' ? newChoreCustomDays : null,
+      // One-off tasks are created from the quick-add flow, never from this
+      // form, but an edit must not strip the day they belong to.
+      onceDate: newChoreFreq === 'once' ? existingChore?.onceDate || null : null,
       category: newChoreCategory || null,
       rotation: newChoreUsers,
       currentIndex: editingChoreId ? (reindexedCurrentIndex >= 0 ? reindexedCurrentIndex : 0) : 0,
@@ -1063,6 +1106,7 @@ export default function ChoresApp() {
     // Clean up nulls for firestore strict rules if needed, though blueprint accepts them
     if (!choreData.customDays) delete (choreData as any).customDays;
     if (!choreData.category) delete (choreData as any).category;
+    if (!choreData.onceDate) delete (choreData as any).onceDate;
     
     try {
       if (editingChoreId) {
@@ -1156,6 +1200,19 @@ export default function ChoresApp() {
   const pendingDeleteOlderHint = pendingDeleteLog
     ? logs.filter(l => l.timestamp <= pendingDeleteLog.timestamp).length
     : 0;
+  const quickTaskSource = chores.find(c => c.id === quickTaskSourceId);
+  // Default the extra round to the person after the one who holds the day, so
+  // the same resident is not asked twice in a row.
+  const quickTaskDefaultAssignee = quickTaskSource
+    ? quickTaskSource.rotation[
+        getNextActiveIndex(
+          quickTaskSource,
+          users,
+          resolveDayAssignee(quickTaskSource, users, selectedDate, today).index,
+          selectedDate
+        )
+      ]
+    : null;
   const swapCandidates = pendingSwapChore
     ? (() => {
         const activeIdx = getActiveAssigneeIndex(pendingSwapChore, users, pendingSwapChore.currentIndex, today);
@@ -1219,6 +1276,10 @@ export default function ChoresApp() {
     );
   }
 
+  // Everything except one-off tasks, which belong to a single day and only make
+  // sense in the day view.
+  const recurringChores = chores.filter(c => c.frequency !== 'once');
+
   const renderTasks = () => {
     const isPastDay = normalizeDay(selectedDate).getTime() < normalizeDay(today).getTime();
     const activeTasks = chores.map(chore => {
@@ -1261,7 +1322,9 @@ export default function ChoresApp() {
     // Week matrix: same day resolution the day view uses, applied to each day of
     // the current week. Open days are computed, completed days are read back
     // from the completion they were frozen to.
-    const weekRows: WeekRow[] = chores
+    // One-off tasks live on a single day and would add a near-empty row, so the
+    // matrix stays about the recurring rotation.
+    const weekRows: WeekRow[] = recurringChores
       .filter(chore => weekChoreIds.length === 0 || weekChoreIds.includes(chore.id))
       .map(chore => ({
         choreId: chore.id,
@@ -1333,7 +1396,7 @@ export default function ChoresApp() {
               >
                 כל המשימות
               </button>
-              {chores.map(c => {
+              {recurringChores.map(c => {
                 const isSelected = weekChoreIds.includes(c.id);
                 return (
                   <button
@@ -1392,7 +1455,7 @@ export default function ChoresApp() {
             className="w-full bg-white border border-[#E6E0D4] rounded-2xl px-4 py-3 text-sm font-medium text-[#6B5E4C] outline-none focus:border-[#A1C181] appearance-none shadow-sm"
           >
             <option value="all">כל המשימות בבית</option>
-            {chores.map(c => (
+            {recurringChores.map(c => (
               <option key={c.id} value={c.id}>{c.name}</option>
             ))}
           </select>
@@ -1465,6 +1528,11 @@ export default function ChoresApp() {
                             <AlertTriangle className="w-3 h-3" /> באיחור
                           </span>
                         )}
+                        {chore.frequency === 'once' && (
+                          <span className="inline-flex items-center gap-1 text-[10px] font-bold text-[#5C4F86] bg-[#7B6CA8]/15 px-2 py-0.5 rounded-full">
+                            <Plus className="w-3 h-3" /> חד פעמי
+                          </span>
+                        )}
                         {assignment.skippedBy && (
                           <span className="inline-flex items-center gap-1 text-[10px] font-bold text-[#8C7E6A] bg-[#F1ECE3] px-2 py-0.5 rounded-full">
                             <FastForward className="w-3 h-3" /> דולג {nameOf(assignment.skippedBy)}
@@ -1472,7 +1540,7 @@ export default function ChoresApp() {
                         )}
                       </div>
                       <p className="text-xs text-[#A39788] mt-1">
-                        {chore.frequency === 'daily' ? 'יומי' : chore.frequency === 'weekly' ? 'שבועי' : 'ימים ספציפיים'}
+                        {frequencyLabel(chore.frequency, chore.customDays)}
                         {chore.category ? ` · ${chore.category}` : ''}
                       </p>
                     </div>
@@ -1534,14 +1602,26 @@ export default function ChoresApp() {
                           <CheckCircle2 className="w-5 h-5" />
                           בוצע
                         </div>
-                        {canUndo && (
-                          <button 
-                            onClick={() => handleUndoDone(chore.id)}
-                            className="text-xs font-bold text-[#8C7E6A] bg-white/60 hover:bg-white px-3 py-1.5 rounded-xl transition-all"
-                          >
-                            בטל סימון
-                          </button>
-                        )}
+                        <div className="flex items-center gap-2">
+                          {isAdmin && !isPastDay && (
+                            <button
+                              onClick={() => setQuickTaskSourceId(chore.id)}
+                              title="הוסף סבב נוסף להיום"
+                              className="flex items-center gap-1 text-xs font-bold text-[#5C4F86] bg-white/60 hover:bg-white px-3 py-1.5 rounded-xl transition-all"
+                            >
+                              <Plus className="w-3.5 h-3.5" />
+                              עוד פעם
+                            </button>
+                          )}
+                          {canUndo && (
+                            <button
+                              onClick={() => handleUndoDone(chore.id)}
+                              className="text-xs font-bold text-[#8C7E6A] bg-white/60 hover:bg-white px-3 py-1.5 rounded-xl transition-all"
+                            >
+                              בטל סימון
+                            </button>
+                          )}
+                        </div>
                       </div>
                       {completionLog && renderReactionBar(completionLog)}
                     </div>
@@ -1559,18 +1639,34 @@ export default function ChoresApp() {
                         <CheckCircle2 className="w-5 h-5" />
                         בוצע
                       </button>
-                      <AdminHint allowed={isAdmin} hint="רק מנהל הבית יכול לדלג / להחליף תור">
-                        <button
-                          onClick={() => setPendingSkipChoreId(chore.id)}
-                          disabled={!isAdmin}
-                          title={isAdmin ? 'דלג' : 'רק מנהל הבית יכול לדלג / להחליף תור'}
-                          aria-label={isAdmin ? 'דלג' : 'רק מנהל הבית יכול לדלג / להחליף תור'}
-                          className={`flex items-center justify-center gap-2 px-4 border border-[#E6E0D4] text-[#8C7E6A] rounded-2xl font-medium hover:bg-[#F3EFE9] active:scale-[0.98] transition-all ${adminDisabledClass}`}
-                        >
-                          <FastForward className="w-5 h-5" />
-                          דלג
-                        </button>
-                      </AdminHint>
+                      {/* A one-off has a single-person rotation, so skipping or
+                          swapping has nothing to move it to; dropping it is the
+                          only sensible correction. */}
+                      {chore.frequency === 'once' ? (
+                        isAdmin && (
+                          <button
+                            onClick={() => handleDeleteChore(chore.id)}
+                            title="מחק משימה חד פעמית"
+                            aria-label="מחק משימה חד פעמית"
+                            className="flex items-center justify-center px-4 border border-[#E6E0D4] text-rose-400 rounded-2xl font-medium hover:bg-rose-50 active:scale-[0.98] transition-all"
+                          >
+                            <Trash2 className="w-5 h-5" />
+                          </button>
+                        )
+                      ) : (
+                        <AdminHint allowed={isAdmin} hint="רק מנהל הבית יכול לדלג / להחליף תור">
+                          <button
+                            onClick={() => setPendingSkipChoreId(chore.id)}
+                            disabled={!isAdmin}
+                            title={isAdmin ? 'דלג' : 'רק מנהל הבית יכול לדלג / להחליף תור'}
+                            aria-label={isAdmin ? 'דלג' : 'רק מנהל הבית יכול לדלג / להחליף תור'}
+                            className={`flex items-center justify-center gap-2 px-4 border border-[#E6E0D4] text-[#8C7E6A] rounded-2xl font-medium hover:bg-[#F3EFE9] active:scale-[0.98] transition-all ${adminDisabledClass}`}
+                          >
+                            <FastForward className="w-5 h-5" />
+                            דלג
+                          </button>
+                        </AdminHint>
+                      )}
                       {chore.rotation && chore.rotation.length > 1 && (
                         <AdminHint allowed={isAdmin} hint="רק מנהל הבית יכול לדלג / להחליף תור">
                           <button
@@ -2376,7 +2472,7 @@ export default function ChoresApp() {
             )}
           </div>
           <div className="flex flex-col gap-3">
-            {chores.map(chore => {
+            {recurringChores.map(chore => {
               const health = getChoreHealth(chore, today);
               const isEditingThis = editingChoreId === chore.id;
               return (
@@ -2388,7 +2484,7 @@ export default function ChoresApp() {
                   <h4 className="font-bold text-[#3D3732]">{chore.name}</h4>
                   <div className="flex gap-2 mt-1 flex-wrap">
                     <span className="text-xs px-2 py-0.5 bg-[#F5F1EA] text-[#A39788] rounded">
-                      {chore.frequency === 'daily' ? 'יומי' : chore.frequency === 'weekly' ? 'שבועי' : 'ימים ספציפיים'}
+                      {frequencyLabel(chore.frequency, chore.customDays)}
                     </span>
                     {chore.category && (
                       <span className="text-xs px-2 py-0.5 bg-[#F5F1EA] text-[#A39788] rounded">{chore.category}</span>
@@ -2503,6 +2599,23 @@ export default function ChoresApp() {
           busy={actionBusy}
           onConfirm={(targetUserId) => completeSwap(pendingSwapChore.id, targetUserId)}
           onCancel={() => !actionBusy && setPendingSwapChoreId(null)}
+        />
+      )}
+      {quickTaskSource && (
+        <QuickTaskModal
+          defaultName={quickTaskSource.name}
+          dateLabel={
+            normalizeDay(selectedDate).getTime() === normalizeDay(today).getTime()
+              ? 'היום'
+              : selectedDate.toLocaleDateString('he-IL', { day: '2-digit', month: '2-digit' })
+          }
+          candidates={quickTaskSource.rotation
+            .map(uid => users.find(u => u.id === uid))
+            .filter((u): u is UserType => !!u)}
+          defaultAssigneeId={quickTaskDefaultAssignee}
+          busy={actionBusy}
+          onConfirm={createOnceTask}
+          onCancel={() => !actionBusy && setQuickTaskSourceId(null)}
         />
       )}
       {composingManualLog && (

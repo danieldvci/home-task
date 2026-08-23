@@ -31,7 +31,8 @@
       "type": "object",
       "properties": {
         "name": { "type": "string", "maxLength": 100 },
-        "frequency": { "type": "string", "enum": ["daily", "weekly", "custom_days"] },
+        "frequency": { "type": "string", "enum": ["daily", "weekly", "custom_days", "once"] },
+        "onceDate": { "type": "string", "maxLength": 40, "description": "The single day a 'once' task occurs on; required for that frequency" },
         "customDays": { "type": "array", "maxLength": 7 },
         "category": { "type": "string", "maxLength": 40 },
         "rotation": { "type": "array", "maxLength": 20 },

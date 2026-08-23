@@ -25,7 +25,10 @@ export type ChoreCompletion = {
 export type Chore = {
   id: string;
   name: string;
-  frequency: 'daily' | 'weekly' | 'custom_days';
+  // 'once' is an extra round of something added on the day it is needed. It
+  // runs through the same completion machinery and then stops occurring.
+  frequency: 'daily' | 'weekly' | 'custom_days' | 'once';
+  onceDate?: string | null;
   customDays?: number[];
   category?: string;
   rotation: string[];
@@ -129,6 +132,9 @@ export const choreAnchorDate = (chore: Chore, fallback: Date) => {
 
 export const choreOccursOnDate = (chore: Chore, date: Date, fallbackAnchor: Date) => {
   if (chore.frequency === 'daily') return true;
+  if (chore.frequency === 'once') {
+    return !!chore.onceDate && dayKey(new Date(chore.onceDate)) === dayKey(date);
+  }
   if (chore.frequency === 'custom_days') return !!chore.customDays?.includes(date.getDay());
   const d = normalizeDay(date).getTime();
   const a = choreAnchorDate(chore, fallbackAnchor).getTime();
@@ -174,7 +180,7 @@ export const getOccurrencesBetween = (chore: Chore, startDate: Date, endDate: Da
 };
 
 export const expectedIntervalDays = (chore: Chore) => {
-  if (chore.frequency === 'daily') return 1;
+  if (chore.frequency === 'daily' || chore.frequency === 'once') return 1;
   if (chore.frequency === 'weekly') return 7;
   if (chore.frequency === 'custom_days' && chore.customDays && chore.customDays.length > 0) {
     return Math.max(1, Math.round(7 / chore.customDays.length));
