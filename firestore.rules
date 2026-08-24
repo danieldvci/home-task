@@ -1,4 +1,11 @@
 rules_version = '2';
+
+// Scope note: these rules enforce membership, document shape, and the identity
+// of whoever writes a log or comment. Whose turn it is to do a chore is
+// deliberately NOT enforced here. Rotation is projected from a completions map
+// and an absence window, which rules cannot compute, so any member can move the
+// queue through the SDK. This is a known and accepted trade-off for a household
+// app, not an oversight; see ROADMAP.md.
 service cloud.firestore {
   match /databases/{database}/documents {
 
@@ -86,9 +93,15 @@ service cloud.firestore {
         && (data.frequency != 'once' || (hasOnceDate && data.onceDate is string));
     }
 
+    // userId is the resident profile the entry is shown as, which is picked
+    // freely on a shared device. actorUid is the account that actually wrote it
+    // and is pinned to the caller, so authorship cannot be faked. Records
+    // written before actorUid existed keep working: it is required on write
+    // only, and log updates never re-validate the whole document.
     function isValidLog(data) {
-      return data.keys().hasAll(['userId', 'action', 'details', 'timestamp'])
-        && data.keys().hasOnly(['userId', 'action', 'details', 'timestamp', 'photoUrl', 'photoUrls', 'choreId', 'reactions', 'comments'])
+      return data.keys().hasAll(['userId', 'actorUid', 'action', 'details', 'timestamp'])
+        && data.keys().hasOnly(['userId', 'actorUid', 'action', 'details', 'timestamp', 'photoUrl', 'photoUrls', 'choreId', 'reactions', 'comments'])
+        && data.actorUid == request.auth.uid
         && data.userId is string && data.userId.size() <= 128
         && data.action is string && data.action.size() <= 100
         && data.details is string && data.details.size() <= 200
@@ -112,10 +125,13 @@ service cloud.firestore {
         );
     }
 
+    // Only the appended comment is validated, so older comments without
+    // actorUid survive untouched.
     function isValidComment(c) {
       return c is map
-        && c.keys().hasOnly(['userId', 'text', 'timestamp'])
-        && c.keys().hasAll(['userId', 'text', 'timestamp'])
+        && c.keys().hasOnly(['userId', 'actorUid', 'text', 'timestamp'])
+        && c.keys().hasAll(['userId', 'actorUid', 'text', 'timestamp'])
+        && c.actorUid == request.auth.uid
         && c.userId is string && c.userId.size() <= 128
         && c.text is string && c.text.size() > 0 && c.text.size() <= 200
         && c.timestamp is string && c.timestamp.size() <= 40;

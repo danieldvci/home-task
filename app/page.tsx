@@ -101,6 +101,11 @@ const CHORE_CATEGORIES = ['מטבח', 'סלון', 'חדר שינה', 'אמבטי
 type LogType = {
   id: string;
   userId: string;
+  /**
+   * Google account that wrote the record, verified by the security rules.
+   * Absent on records written before the binding existed.
+   */
+  actorUid?: string;
   action: string;
   details: string;
   timestamp: string;
@@ -113,9 +118,14 @@ type LogType = {
   comments?: LogComment[];
 };
 
-/** Shape of a log document as written by the client. */
+/**
+ * Shape of a log document as written by the client. `userId` is the resident
+ * profile the entry is attributed to, which residents pick freely on a shared
+ * device; `actorUid` is the signed-in account and is required on every write.
+ */
 type LogWrite = {
   userId: string;
+  actorUid: string;
   action: string;
   details: string;
   timestamp: string;
@@ -454,10 +464,11 @@ export default function ChoresApp() {
   })();
 
   const logAction = async (action: string, details: string, photoUrl?: string) => {
-    if (!householdId || !currentUserId) return;
+    if (!householdId || !currentUserId || !user) return;
     const logId = `l${crypto.randomUUID().split('-')[0]}`;
     const payload: LogWrite = {
       userId: currentUserId,
+      actorUid: user.uid,
       action,
       details,
       timestamp: new Date().toISOString()
@@ -470,7 +481,7 @@ export default function ChoresApp() {
   // A history-only record of work done outside the rotation. It writes a single
   // log and touches no chore state, so it cannot affect anyone's turn.
   const createManualLog = async (text: string, choreId: string | null, photos: Blob[]) => {
-    if (!householdId || !currentUserId) return;
+    if (!householdId || !currentUserId || !user) return;
     const linkedChore = choreId ? chores.find(c => c.id === choreId) : undefined;
     setActionBusy(true);
     try {
@@ -488,6 +499,7 @@ export default function ChoresApp() {
       }
       const payload: LogWrite = {
         userId: currentUserId,
+        actorUid: user.uid,
         action: MANUAL_LOG_ACTION,
         details: joinDetails(text, [
           linkedChore ? `בנוגע ל"${linkedChore.name}"` : null,
@@ -570,7 +582,7 @@ export default function ChoresApp() {
   };
 
   const addComment = async (log: LogType, text: string) => {
-    if (!householdId || !currentUserId) return;
+    if (!householdId || !currentUserId || !user) return;
     const comments = log.comments || [];
     if (comments.length >= COMMENTS_MAX) {
       showToast('הגעתם למספר התגובות המקסימלי לרשומה זו');
@@ -578,6 +590,7 @@ export default function ChoresApp() {
     }
     const comment: LogComment = {
       userId: currentUserId,
+      actorUid: user.uid,
       text: text.trim().slice(0, COMMENT_MAX_LENGTH),
       timestamp: new Date().toISOString()
     };
@@ -621,7 +634,7 @@ export default function ChoresApp() {
   );
 
   const completeDone = async (choreId: string, photoBlobs: Blob[]) => {
-    if (!householdId || !currentUserId) return;
+    if (!householdId || !currentUserId || !user) return;
     const chore = chores.find(c => c.id === choreId);
     if (!chore) return;
     // Resolve the day actually being marked done (may be backdated), so the
@@ -686,6 +699,7 @@ export default function ChoresApp() {
         const baseDetails = `סיים/ה את "${fresh.name}"`;
         const logPayload: LogWrite = {
           userId: currentUserId,
+          actorUid: user.uid,
           action: 'ביצוע משימה',
           details: joinDetails(baseDetails, context),
           timestamp: new Date().toISOString()

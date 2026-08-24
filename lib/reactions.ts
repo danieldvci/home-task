@@ -25,7 +25,13 @@ export const REACTION_BY_ID: Record<string, ReactionDef | undefined> = REACTIONS
 );
 
 export type LogComment = {
+  /** Resident profile the comment is shown as. */
   userId: string;
+  /**
+   * Google account that wrote it, verified by the security rules. Absent on
+   * comments written before the binding existed.
+   */
+  actorUid?: string;
   text: string;
   timestamp: string;
 };

@@ -17,9 +17,13 @@ service firebase.storage {
         && request.auth.uid == firestore.get(/databases/(default)/documents/households/$(householdId)).data.ownerId;
     }
 
+    // Proof photos are evidence, so a name may be claimed once and never
+    // replaced: `resource == null` allows the first upload and rejects any
+    // write over an existing file.
     match /households/{householdId}/proofs/{fileName} {
       allow read: if isMember(householdId);
       allow write: if isMember(householdId)
+        && resource == null
         && request.resource.size < 3 * 1024 * 1024
         && request.resource.contentType.matches('image/jpeg');
     }

@@ -53,7 +53,8 @@
       "description": "Activity log entry",
       "type": "object",
       "properties": {
-        "userId": { "type": "string", "maxLength": 128 },
+        "userId": { "type": "string", "maxLength": 128, "description": "Resident profile the entry is attributed to" },
+        "actorUid": { "type": "string", "maxLength": 128, "description": "Signed-in account that wrote the entry; required on write, absent on records predating the binding" },
         "action": { "type": "string", "maxLength": 100 },
         "details": { "type": "string", "maxLength": 200 },
         "timestamp": { "type": "string", "maxLength": 40 },
@@ -61,9 +62,9 @@
         "photoUrls": { "type": "array", "maxLength": 3, "description": "Proof photos in pick order" },
         "choreId": { "type": "string", "maxLength": 128, "description": "Chore this record refers to, when one was linked" },
         "reactions": { "type": "object", "description": "authUid -> like | love | laugh | wow | dislike" },
-        "comments": { "type": "array", "maxLength": 30 }
+        "comments": { "type": "array", "maxLength": 30, "description": "{ userId, actorUid, text, timestamp }; actorUid is the signed-in account, required on write" }
       },
-      "required": ["userId", "action", "details", "timestamp"]
+      "required": ["userId", "actorUid", "action", "details", "timestamp"]
     }
   },
   "firestore": {
