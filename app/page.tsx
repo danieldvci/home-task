@@ -62,7 +62,7 @@ import {
   choreAnchorDate,
   choreOccursOnDate,
   completionMarkers,
-  getActiveAssigneeIndex,
+  currentIndexAfterUndo,
   getChoreHealth,
   getNextActiveIndex,
   isUserAbsentNow,
@@ -158,6 +158,7 @@ const ACTION_STYLES: Record<string, { Icon: LucideIcon; className: string }> = {
   'ביצוע משימה': { Icon: CheckCircle2, className: 'bg-[#A1C181]/20 text-[#5F7A45]' },
   'ביטול משימה': { Icon: RotateCcw, className: 'bg-[#E9C46A]/25 text-[#8A6D1F]' },
   'דילוג משימה': { Icon: FastForward, className: 'bg-[#3D5A80]/15 text-[#3D5A80]' },
+  'ביטול דילוג': { Icon: RotateCcw, className: 'bg-[#3D5A80]/15 text-[#3D5A80]' },
   'החלפת תור': { Icon: Repeat, className: 'bg-[#7B6CA8]/20 text-[#5C4F86]' },
   'יצירת משימה': { Icon: Plus, className: 'bg-[#A1C181]/20 text-[#5F7A45]' },
   'עריכת משימה': { Icon: Pencil, className: 'bg-[#8C7E6A]/20 text-[#6B5E4C]' },
@@ -733,25 +734,63 @@ export default function ChoresApp() {
       return;
     }
 
-    const isFutureDay = normalizeDay(selectedDate).getTime() > normalizeDay(today).getTime();
     const restoredIdx = assignment.index >= 0 ? assignment.index : chore.currentIndex;
+    const nextIndex = currentIndexAfterUndo(chore, selectedDate, restoredIdx, today);
     const completions = withoutCompletion(chore, selectedDate, today);
 
     try {
       await updateDoc(doc(db, 'households', householdId, 'chores', choreId), {
         ...completionMarkers(completions),
-        currentIndex: isFutureDay ? chore.currentIndex : restoredIdx,
+        currentIndex: nextIndex,
         completions
       });
       await logAction(
         'ביטול משימה',
         joinDetails(`ביטל/ה את סימון "${chore.name}"`, [
-          isFutureDay ? null : `התור חוזר ל${nameOf(chore.rotation[restoredIdx])}`
+          nextIndex === restoredIdx ? `התור חוזר ל${nameOf(chore.rotation[restoredIdx])}` : null
         ])
       );
     } catch (err) {
       console.error(err);
       showToast('ביטול הסימון נכשל');
+    }
+  };
+
+  // A skip is admin-only, so undoing one is too. It hands the day back to the
+  // resident who was passed over and leaves the completion markers alone,
+  // exactly as the skip itself did.
+  const handleUndoSkip = async (choreId: string) => {
+    if (!householdId || !isAdmin) return;
+    const chore = chores.find(c => c.id === choreId);
+    if (!chore) return;
+
+    const assignment = resolveDayAssignee(chore, users, selectedDate, today);
+    const skippedBy = assignment.skippedBy;
+    if (!skippedBy) return;
+    const restoredIdx = chore.rotation.indexOf(skippedBy);
+    const nextIndex =
+      restoredIdx >= 0
+        ? currentIndexAfterUndo(chore, selectedDate, restoredIdx, today)
+        : chore.currentIndex;
+    const completions = withoutCompletion(chore, selectedDate, today);
+
+    setActionBusy(true);
+    try {
+      await updateDoc(doc(db, 'households', householdId, 'chores', choreId), {
+        currentIndex: nextIndex,
+        completions
+      });
+      await logAction(
+        'ביטול דילוג',
+        joinDetails(`ביטל/ה את הדילוג על "${chore.name}"`, [
+          nextIndex === restoredIdx ? `התור חוזר ל${nameOf(skippedBy)}` : null
+        ])
+      );
+    } catch (err) {
+      console.error(err);
+      showToast('ביטול הדילוג נכשל');
+    } finally {
+      setActionBusy(false);
     }
   };
 
@@ -804,9 +843,16 @@ export default function ChoresApp() {
     if (!householdId || !isAdmin) return;
     const chore = chores.find(c => c.id === choreId);
     if (!chore) return;
+    // Swap whoever the card shows for the viewed day, not whoever happens to
+    // hold the turn today.
+    const assignment = resolveDayAssignee(chore, users, selectedDate, today);
+    if (assignment.done) {
+      showToast('המשימה כבר סומנה כבוצעה ליום זה');
+      return;
+    }
     setActionBusy(true);
     try {
-      const activeIdx = getActiveAssigneeIndex(chore, users, chore.currentIndex, today);
+      const activeIdx = assignment.index;
       const targetIdx = chore.rotation.indexOf(targetUserId);
       if (targetIdx === -1 || targetIdx === activeIdx) throw new Error('invalid_swap_target');
       const newRotation = [...chore.rotation];
@@ -1213,14 +1259,15 @@ export default function ChoresApp() {
         )
       ]
     : null;
+  // Candidates are read against the viewed day, matching who completeSwap will
+  // actually move.
   const swapCandidates = pendingSwapChore
     ? (() => {
-        const activeIdx = getActiveAssigneeIndex(pendingSwapChore, users, pendingSwapChore.currentIndex, today);
-        const activeUserId = pendingSwapChore.rotation[activeIdx];
+        const activeUserId = resolveDayAssignee(pendingSwapChore, users, selectedDate, today).userId;
         return pendingSwapChore.rotation
           .filter(uid => uid !== activeUserId)
           .map(uid => users.find(u => u.id === uid))
-          .filter((u): u is UserType => !!u && !isUserAbsentOnDay(u, today));
+          .filter((u): u is UserType => !!u && !isUserAbsentOnDay(u, selectedDate));
       })()
     : [];
 
@@ -1536,6 +1583,17 @@ export default function ChoresApp() {
                         {assignment.skippedBy && (
                           <span className="inline-flex items-center gap-1 text-[10px] font-bold text-[#8C7E6A] bg-[#F1ECE3] px-2 py-0.5 rounded-full">
                             <FastForward className="w-3 h-3" /> דולג {nameOf(assignment.skippedBy)}
+                            {isAdmin && (
+                              <button
+                                onClick={() => handleUndoSkip(chore.id)}
+                                disabled={actionBusy}
+                                title="בטל דילוג"
+                                aria-label="בטל דילוג"
+                                className="mr-0.5 p-0.5 rounded-full hover:bg-white/70 transition-colors disabled:opacity-50"
+                              >
+                                <RotateCcw className="w-3 h-3" />
+                              </button>
+                            )}
                           </span>
                         )}
                       </div>

@@ -329,6 +329,28 @@ export const withoutCompletion = (chore: Chore, day: Date, today: Date = new Dat
   return next;
 };
 
+/**
+ * Pointer to write when a recorded day is undone, given the chore as it stands
+ * before the write and the index the day was frozen to.
+ *
+ * Handing the turn back to that person is only correct when nothing was
+ * recorded after the day: a later completion or skip already moved the pointer
+ * past it, and rewinding would hand the same turn out twice. Completing a
+ * future occurrence never advanced the pointer, so undoing one never rewinds it
+ * either.
+ */
+export const currentIndexAfterUndo = (
+  chore: Chore,
+  day: Date,
+  restoredIndex: number,
+  today: Date = new Date()
+) => {
+  if (normalizeDay(day).getTime() > normalizeDay(today).getTime()) return chore.currentIndex;
+  const key = dayKey(day);
+  const hasLaterRecord = Object.keys(chore.completions || {}).some(k => k > key);
+  return hasLaterRecord ? chore.currentIndex : restoredIndex;
+};
+
 // Local noon, so re-parsing the value can never land on a neighbouring day.
 export const dayKeyToDate = (key: string) => {
   const [year, month, day] = key.split('-').map(Number);

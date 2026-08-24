@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import {
   choreOccursOnDate,
   completionMarkers,
+  currentIndexAfterUndo,
   dayKey,
   getActiveAssigneeIndex,
   getNextActiveIndex,
@@ -313,6 +314,85 @@ const trio = [present('u1'), present('u2'), present('u3')];
     'a rotation member with no profile is not available either'
   );
   assert.equal(isEveryoneAwayOnDay(makeChore({ rotation: [] }), trio, TUE), false, 'an empty rotation is not "away"');
+}
+
+// --- Undo restores the turn only when nothing came after -------------------
+
+{
+  const tueOnly = { [dayKey(TUE)]: { userId: 'u1', logId: 'l1', at: TUE.toISOString() } };
+  const chore = makeChore({ currentIndex: 1, completions: tueOnly });
+  assert.equal(
+    currentIndexAfterUndo(chore, TUE, 0, TUE),
+    0,
+    'undoing the newest completion hands the turn back to its completer'
+  );
+
+  // u1 did Tuesday and u2 did Wednesday; undoing Tuesday must not rewind past
+  // Wednesday, or u3 would lose Thursday to u2 a second time.
+  const bothDays = {
+    ...tueOnly,
+    [dayKey(WED)]: { userId: 'u2', logId: 'l2', at: WED.toISOString() }
+  };
+  const later = makeChore({ currentIndex: 2, completions: bothDays });
+  assert.equal(
+    currentIndexAfterUndo(later, TUE, 0, WED),
+    2,
+    'a later completion already defines the pointer'
+  );
+  assert.equal(
+    currentIndexAfterUndo(later, WED, 1, WED),
+    1,
+    'undoing the newest of several still restores'
+  );
+
+  // A skip counts as a later record for the same reason.
+  const skipAfter = makeChore({
+    currentIndex: 2,
+    completions: {
+      ...tueOnly,
+      [dayKey(WED)]: { userId: 'u2', at: WED.toISOString(), skipped: true }
+    }
+  });
+  assert.equal(currentIndexAfterUndo(skipAfter, TUE, 0, WED), 2, 'a later skip counts too');
+
+  // Completing a future day never moved the pointer, so undoing cannot move it.
+  const future = makeChore({
+    currentIndex: 1,
+    completions: { [dayKey(THU)]: { userId: 'u1', logId: 'l3', at: TUE.toISOString() } }
+  });
+  assert.equal(currentIndexAfterUndo(future, THU, 0, TUE), 1, 'undoing a future day leaves the pointer');
+}
+
+// --- Undoing a skip --------------------------------------------------------
+
+{
+  // u1 was skipped on Tuesday, so the pointer sits on u2. Undoing that skip has
+  // to drop the record and hand Tuesday back to u1.
+  const chore = makeChore({
+    currentIndex: 1,
+    completions: { [dayKey(TUE)]: { userId: 'u1', at: TUE.toISOString(), skipped: true } }
+  });
+  const skippedBy = resolveDayAssignee(chore, trio, TUE, TUE).skippedBy!;
+  const restoredIdx = chore.rotation.indexOf(skippedBy);
+  const completions = withoutCompletion(chore, TUE, TUE);
+
+  assert.equal(currentIndexAfterUndo(chore, TUE, restoredIdx, TUE), 0, 'the skipped resident gets the turn back');
+  assert.equal(Object.keys(completions).length, 0, 'the skip record is gone');
+  assert.equal(
+    resolveDayAssignee({ ...chore, currentIndex: 0, completions }, trio, TUE, TUE).userId,
+    'u1',
+    'Tuesday is open for u1 again'
+  );
+}
+
+// --- Swapping reads the viewed day, not today ------------------------------
+
+{
+  // The pointer is on u1 today, so a swap driven by `today` would always move
+  // u1. Thursday belongs to u3, and that is who the card offers to swap.
+  const chore = makeChore({ currentIndex: 0 });
+  assert.equal(getActiveAssigneeIndex(chore, trio, chore.currentIndex, TUE), 0, 'today belongs to u1');
+  assert.equal(resolveDayAssignee(chore, trio, THU, TUE).index, 2, 'Thursday belongs to u3');
 }
 
 // --- One-off tasks ---------------------------------------------------------
