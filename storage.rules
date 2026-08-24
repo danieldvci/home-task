@@ -5,6 +5,11 @@ service firebase.storage {
       return request.auth != null;
     }
 
+    // These lookups are cross-service Rules. They only work once the Cloud
+    // Storage service agent has been granted
+    // roles/firebaserules.firestoreServiceAgent; without it every call returns
+    // null and every rule below denies. Deploying interactively prompts for
+    // the grant, so never deploy this file with --non-interactive.
     function isMember(householdId) {
       return isSignedIn()
         && firestore.exists(/databases/(default)/documents/households/$(householdId))
@@ -30,10 +35,14 @@ service firebase.storage {
 
     // Custom profile-photo uploads. A member may set their own avatar; the
     // household owner may set an avatar for local (non-Google) residents too.
-    match /households/{householdId}/avatars/{userId} {
+    // The client stores an avatar as <userId>.jpg, and the wildcard binds the
+    // whole file name, extension included, so the comparison has to spell it
+    // out. Matching on the bare uid silently locked every non-owner member out
+    // of their own avatar.
+    match /households/{householdId}/avatars/{fileName} {
       allow read: if isMember(householdId);
       allow write: if isMember(householdId)
-        && (request.auth.uid == userId || isOwnerOfHousehold(householdId))
+        && (fileName == request.auth.uid + '.jpg' || isOwnerOfHousehold(householdId))
         && request.resource.size < 2 * 1024 * 1024
         && request.resource.contentType.matches('image/jpeg');
     }

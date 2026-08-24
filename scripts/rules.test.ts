@@ -353,8 +353,10 @@ async function main() {
 
   const proof = (context: RulesTestContext, index = 0) =>
     ref(st(context), `households/${HOUSEHOLD}/proofs/log${caseId}_${index}.jpg`);
+  // Mirrors uploadUserAvatar: the extension is part of the file name the rule
+  // matches on, so a test path without it would not exercise the real rule.
   const avatar = (context: RulesTestContext, userId: string) =>
-    ref(st(context), `households/${HOUSEHOLD}/avatars/${userId}`);
+    ref(st(context), `households/${HOUSEHOLD}/avatars/${userId}.jpg`);
 
   await test('a member uploads a proof photo', async () => {
     await assertSucceeds(uploadBytes(proof(testEnv.authenticatedContext(MEMBER)), jpeg, asJpeg));
