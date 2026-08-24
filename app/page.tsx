@@ -27,7 +27,8 @@ import {
   AlertTriangle,
   Loader2,
   RotateCcw,
-  StickyNote
+  StickyNote,
+  Home
 } from 'lucide-react';
 import type { LucideIcon } from 'lucide-react';
 import { motion, AnimatePresence } from 'motion/react';
@@ -52,6 +53,7 @@ import {
   SwapTurnModal,
   DeleteLogConfirmModal
 } from '../components/TaskModals';
+import { CollapsibleSection } from '../components/CollapsibleSection';
 import { WeekOverview } from '../components/WeekOverview';
 import type { WeekPerson, WeekRow } from '../components/WeekOverview';
 import { householdDisplayName, profileStorageKey } from '../lib/household-utils';
@@ -1684,6 +1686,7 @@ export default function ChoresApp() {
               const completionLog = assignment.logId
                 ? logs.find(l => l.id === assignment.logId)
                 : undefined;
+              const proofPhotos = completionLog ? logPhotos(completionLog) : [];
               return (
                 <motion.div
                   layout
@@ -1723,6 +1726,19 @@ export default function ChoresApp() {
                               </button>
                             )}
                           </span>
+                        )}
+                        {proofPhotos.length > 0 && (
+                          <a
+                            href={proofPhotos[0]}
+                            target="_blank"
+                            rel="noreferrer"
+                            title={photoLabel(proofPhotos.length)}
+                            aria-label={photoLabel(proofPhotos.length)}
+                            className="inline-flex items-center gap-1 text-[10px] font-bold text-[#6B5E4C] bg-[#A1C181]/25 px-2 py-0.5 rounded-full hover:bg-[#A1C181]/40 transition-colors"
+                          >
+                            <Camera className="w-3 h-3" />
+                            {proofPhotos.length > 1 && proofPhotos.length}
+                          </a>
                         )}
                       </div>
                       <p className="text-xs text-[#A39788] mt-1">
@@ -2185,9 +2201,9 @@ export default function ChoresApp() {
 
   const renderSettings = () => {
     return (
-      <div className="flex flex-col gap-8 pb-24">
+      <div className="flex flex-col gap-6 pb-24">
         
-        {/* Profile Switcher & Share */}
+        {/* Acting profile: the one control here used every day, so never folded */}
         <section className="bg-white p-5 rounded-3xl border border-[#E6E0D4] shadow-sm flex flex-col gap-4">
           <div className="flex items-center justify-between">
             <div className="flex items-center gap-4">
@@ -2250,8 +2266,14 @@ export default function ChoresApp() {
             </button>
           </div>
 
-          <div className="h-px bg-[#E6E0D4] w-full my-1"></div>
+        </section>
 
+        <CollapsibleSection
+          title="ניהול הבית"
+          Icon={Home}
+          hint={households.length > 1 ? `${households.length} בתים` : undefined}
+        >
+          <section className="bg-white p-5 rounded-3xl border border-[#E6E0D4] shadow-sm flex flex-col gap-4">
           <div className="flex flex-col gap-3">
             <p className="text-xs font-bold text-[#8C7E6A]">הבתים שלי</p>
             <div className="flex flex-col gap-2">
@@ -2401,9 +2423,13 @@ export default function ChoresApp() {
               </div>
             </div>
           )}
-          
+          </section>
+        </CollapsibleSection>
+
+        <CollapsibleSection title="חשבון והתראות" Icon={Shield}>
+          <section className="bg-white p-5 rounded-3xl border border-[#E6E0D4] shadow-sm flex flex-col gap-4">
           {remindersSupported() && (
-            <div className="flex items-center justify-between pt-2 border-t border-[#E6E0D4]">
+            <div className="flex items-center justify-between">
               <div>
                 <p className="text-sm font-medium text-[#3D3732]">תזכורות בדפדפן</p>
                 <p className="text-xs text-[#8C7E6A]">קבל תזכורת כשהתור שלך היום ולא בוצע. התזכורת מופיעה רק כשהאפליקציה פתוחה — אין התראות ברקע.</p>
@@ -2430,30 +2456,33 @@ export default function ChoresApp() {
             </div>
           )}
 
-          <div className="flex items-center justify-between mt-2 pt-4 border-t border-[#E6E0D4]">
+          <div className={`flex items-center justify-between ${remindersSupported() ? 'pt-2 border-t border-[#E6E0D4]' : ''}`}>
              <span className="text-xs text-[#8C7E6A]">מחובר כ- {user?.email}</span>
              <button onClick={() => logout().catch(() => showToast('ההתנתקות נכשלה'))} className="text-xs font-bold text-rose-500 hover:underline flex items-center gap-1">
                <LogOut className="w-3 h-3"/> התנתק
              </button>
           </div>
-        </section>
+          </section>
+        </CollapsibleSection>
 
         {/* User Management */}
-        <section>
-          <div className="mb-4">
-            <h2 className="text-xl font-bold text-[#3D3732]">דיירי הבית</h2>
-            {!isAdmin && (
-              <p className="text-xs text-[#8C7E6A] mt-1">רק מנהל הבית יכול להוסיף או לערוך דיירים מקומיים</p>
-            )}
-            {users.length >= MEMBER_SOFT_LIMIT - 2 && (
-              <p className={`text-xs font-medium mt-1 flex items-center gap-1 ${users.length >= MEMBER_SOFT_LIMIT ? 'text-rose-600' : 'text-[#B99543]'}`}>
-                <AlertTriangle className="w-3 h-3" />
-                {users.length >= MEMBER_SOFT_LIMIT
-                  ? `הגעתם למגבלת ${MEMBER_SOFT_LIMIT} דיירים בבית`
-                  : `מתקרבים למגבלת הדיירים (${users.length}/${MEMBER_SOFT_LIMIT})`}
-              </p>
-            )}
-          </div>
+        <CollapsibleSection
+          title="דיירי הבית"
+          Icon={UserCheck}
+          hint={`${users.length}`}
+          defaultOpen
+        >
+          {!isAdmin && (
+            <p className="text-xs text-[#8C7E6A] -mt-1">רק מנהל הבית יכול להוסיף או לערוך דיירים מקומיים</p>
+          )}
+          {users.length >= MEMBER_SOFT_LIMIT - 2 && (
+            <p className={`text-xs font-medium -mt-1 flex items-center gap-1 ${users.length >= MEMBER_SOFT_LIMIT ? 'text-rose-600' : 'text-[#B99543]'}`}>
+              <AlertTriangle className="w-3 h-3" />
+              {users.length >= MEMBER_SOFT_LIMIT
+                ? `הגעתם למגבלת ${MEMBER_SOFT_LIMIT} דיירים בבית`
+                : `מתקרבים למגבלת הדיירים (${users.length}/${MEMBER_SOFT_LIMIT})`}
+            </p>
+          )}
           <div className="bg-white border border-[#E6E0D4] rounded-3xl shadow-sm divide-y divide-[#E6E0D4] overflow-hidden">
             {users.map(u => {
               if (editingUserId === u.id) {
@@ -2620,18 +2649,12 @@ export default function ChoresApp() {
               </AdminHint>
             )}
           </div>
-        </section>
+        </CollapsibleSection>
 
         {/* Leaderboard */}
         {leaderboard.length > 0 && (
-          <section>
-            <div className="mb-4">
-              <h2 className="text-xl font-bold text-[#3D3732] flex items-center gap-2">
-                <Trophy className="w-5 h-5 text-[#B99543]" />
-                מובילי הביצועים
-              </h2>
-              <p className="text-xs text-[#8C7E6A] mt-1">לפי הפעילות האחרונה (עד 50 רשומות)</p>
-            </div>
+          <CollapsibleSection title="מובילי הביצועים" Icon={Trophy}>
+            <p className="text-xs text-[#8C7E6A] -mt-1">לפי הפעילות האחרונה (עד 50 רשומות)</p>
             <div className="bg-white border border-[#E6E0D4] rounded-3xl shadow-sm divide-y divide-[#E6E0D4] overflow-hidden">
               {leaderboard.map(({ user: u, count }, idx) => (
                 <div key={u.id} className="flex items-center justify-between p-4">
@@ -2646,17 +2669,14 @@ export default function ChoresApp() {
                 </div>
               ))}
             </div>
-          </section>
+          </CollapsibleSection>
         )}
 
         {/* Task Management — visible to all, write actions owner-only */}
-        <section>
-          <div className="mb-4">
-            <h2 className="text-xl font-bold text-[#3D3732]">ניהול משימות</h2>
-            {!isAdmin && (
-              <p className="text-xs text-[#8C7E6A] mt-1">רק מנהל הבית יכול להוסיף או לערוך משימות</p>
-            )}
-          </div>
+        <CollapsibleSection title="ניהול משימות" Icon={ListTodo} hint={`${recurringChores.length}`}>
+          {!isAdmin && (
+            <p className="text-xs text-[#8C7E6A] -mt-1">רק מנהל הבית יכול להוסיף או לערוך משימות</p>
+          )}
           <div className="flex flex-col gap-3">
             {recurringChores.map(chore => {
               const health = getChoreHealth(chore, today);
@@ -2747,7 +2767,14 @@ export default function ChoresApp() {
               </AdminHint>
             ) : null}
           </div>
-        </section>
+        </CollapsibleSection>
+
+        <footer className="text-center pt-2">
+          <p className="text-sm font-bold text-[#A39788]">תורנויות הבית</p>
+          <p className="text-[10px] text-[#C0B7A8] font-medium uppercase tracking-wider mt-0.5">
+            פותח על ידי דניאל כהן
+          </p>
+        </footer>
       </div>
     );
   };
@@ -2834,30 +2861,12 @@ export default function ChoresApp() {
           handleAvatarFileChange(f);
         }}
       />
-      <header className="sticky top-0 z-10 bg-[#FAF9F6]/80 backdrop-blur-xl border-b border-[#E6E0D4] px-6 py-4 flex flex-col items-center gap-2">
-        <h1 className="text-2xl font-extrabold text-[#3D3732] text-center tracking-tight">תורנויות הבית</h1>
-        <p className="text-[10px] text-[#A39788] font-medium uppercase tracking-wider">פותח על ידי דניאל כהן</p>
-        {households.length > 1 && household && (
-          <label className="w-full max-w-xs">
-            <span className="sr-only">החלף בית</span>
-            <select
-              value={householdId || ''}
-              onChange={(e) => selectHousehold(e.target.value)}
-              className="w-full mt-1 bg-white border border-[#E6E0D4] rounded-xl px-3 py-2 text-sm font-medium text-[#3D3732] outline-none focus:border-[#A1C181]"
-            >
-              {households.map((h) => (
-                <option key={h.id} value={h.id}>
-                  {householdDisplayName(h)}
-                </option>
-              ))}
-            </select>
-          </label>
-        )}
-        {households.length === 1 && household && (
-          <p className="text-xs text-[#8C7E6A] font-medium truncate max-w-full">
-            {householdDisplayName(household)}
-          </p>
-        )}
+      {/* One line: the active home is the only thing here that changes, and
+          switching homes lives in settings rather than on every screen. */}
+      <header className="sticky top-0 z-10 bg-[#FAF9F6]/80 backdrop-blur-xl border-b border-[#E6E0D4] px-6 py-3 flex items-center justify-center">
+        <h1 className="text-lg font-extrabold text-[#3D3732] tracking-tight truncate max-w-full">
+          {household ? householdDisplayName(household) : 'תורנויות הבית'}
+        </h1>
       </header>
 
       <main className="flex-1 px-6 pt-6 overflow-y-auto">
