@@ -33,7 +33,7 @@ import type { LucideIcon } from 'lucide-react';
 import { motion, AnimatePresence } from 'motion/react';
 import { useAuth, useHousehold } from '../lib/hooks';
 import { db } from '../lib/firebase';
-import { collection, doc, onSnapshot, setDoc, deleteDoc, updateDoc, query, orderBy, limit, writeBatch, getDocs, where } from 'firebase/firestore';
+import { collection, doc, onSnapshot, setDoc, deleteDoc, updateDoc, query, orderBy, limit, writeBatch, runTransaction, getDocs, where } from 'firebase/firestore';
 import {
   MAX_PROOF_PHOTOS,
   uploadTaskProofs,
@@ -627,73 +627,98 @@ export default function ChoresApp() {
     // Resolve the day actually being marked done (may be backdated), so the
     // permission check and rotation advance match what the UI displayed for
     // that day rather than "today"'s raw pointer.
-    const assignment = resolveDayAssignee(chore, users, selectedDate, today);
-    if (assignment.done) {
+    // Cheap check off local state so the common rejection is instant; the
+    // binding decision is made again inside the transaction against the
+    // stored document.
+    const preview = resolveDayAssignee(chore, users, selectedDate, today);
+    if (preview.done) {
       showToast('המשימה כבר סומנה כבוצעה ליום זה');
       return;
     }
-    if (!isAdmin && assignment.userId !== currentUserId) {
+    if (!isAdmin && preview.userId !== currentUserId) {
       showToast('ניתן לסמן בוצע רק בתור שלך');
       return;
     }
-    // The completed day is frozen to the person it was assigned to, so neither
-    // the rotation advance below nor a later absence can move it on.
-    const completedBy = assignment.userId ?? currentUserId;
+
+    const logId = `l${crypto.randomUUID().split('-')[0]}`;
+    const choreRef = doc(db, 'households', householdId, 'chores', choreId);
+    const logRef = doc(db, 'households', householdId, 'logs', logId);
+    const photos = photoBlobs.slice(0, MAX_PROOF_PHOTOS);
     const isFutureDay = normalizeDay(selectedDate).getTime() > normalizeDay(today).getTime();
     setActionBusy(true);
     try {
-      const logId = `l${crypto.randomUUID().split('-')[0]}`;
-      // Completing an occurrence ahead of time must not steal the turn from the
-      // days in between, so the pointer only moves for today or a past day.
-      const nextIdx = isFutureDay
-        ? chore.currentIndex
-        : getNextActiveIndex(chore, users, assignment.index, selectedDate);
-      const choreRef = doc(db, 'households', householdId, 'chores', choreId);
-      const logRef = doc(db, 'households', householdId, 'logs', logId);
-      const completions = withCompletion(
-        chore,
-        selectedDate,
-        { userId: completedBy, logId, at: new Date().toISOString() },
-        today
-      );
-      const choreUpdate = {
-        ...completionMarkers(completions),
-        currentIndex: nextIdx,
-        completions
-      };
-      // Spell out who picks the task up next, and flag a completion that was
-      // backdated to a day other than today, so the log is self-explanatory.
-      const isBackdated =
-        normalizeDay(selectedDate).getTime() !== normalizeDay(new Date()).getTime();
-      const context = [
-        isFutureDay ? null : `התור עובר ל${nameOf(chore.rotation[nextIdx])}`,
-        isBackdated
-          ? `עבור ${selectedDate.toLocaleDateString('he-IL', { day: '2-digit', month: '2-digit' })}`
-          : null
-      ];
-      const baseDetails = `סיים/ה את "${chore.name}"`;
-      const logPayload: LogWrite = {
-        userId: currentUserId,
-        action: 'ביצוע משימה',
-        details: joinDetails(baseDetails, context),
-        timestamp: new Date().toISOString()
-      };
+      // Two people finishing the same chore, or one person double-tapping on
+      // two devices, would otherwise each write back a whole completions map
+      // built from their own stale copy and drop the other's days.
+      const result = await runTransaction(db, async (tx) => {
+        const snap = await tx.get(choreRef);
+        if (!snap.exists()) return { ok: false as const, reason: 'missing' as const };
+        const fresh = { id: snap.id, ...snap.data() } as Chore;
+        const assignment = resolveDayAssignee(fresh, users, selectedDate, today);
+        if (assignment.done) return { ok: false as const, reason: 'done' as const };
+        if (!isAdmin && assignment.userId !== currentUserId) {
+          return { ok: false as const, reason: 'turn' as const };
+        }
+        // The completed day is frozen to the person it was assigned to, so
+        // neither the rotation advance below nor a later absence can move it on.
+        const completedBy = assignment.userId ?? currentUserId;
+        // Completing an occurrence ahead of time must not steal the turn from
+        // the days in between, so the pointer only moves for today or a past day.
+        const nextIdx = isFutureDay
+          ? fresh.currentIndex
+          : getNextActiveIndex(fresh, users, assignment.index, selectedDate);
+        const completions = withCompletion(
+          fresh,
+          selectedDate,
+          { userId: completedBy, logId, at: new Date().toISOString() },
+          today
+        );
+        // Spell out who picks the task up next, and flag a completion that was
+        // backdated to a day other than today, so the log is self-explanatory.
+        const isBackdated =
+          normalizeDay(selectedDate).getTime() !== normalizeDay(new Date()).getTime();
+        const context = [
+          isFutureDay ? null : `התור עובר ל${nameOf(fresh.rotation[nextIdx])}`,
+          isBackdated
+            ? `עבור ${selectedDate.toLocaleDateString('he-IL', { day: '2-digit', month: '2-digit' })}`
+            : null
+        ];
+        const baseDetails = `סיים/ה את "${fresh.name}"`;
+        const logPayload: LogWrite = {
+          userId: currentUserId,
+          action: 'ביצוע משימה',
+          details: joinDetails(baseDetails, context),
+          timestamp: new Date().toISOString()
+        };
 
-      const photos = photoBlobs.slice(0, MAX_PROOF_PHOTOS);
-      if (photos.length === 0) {
-        const batch = writeBatch(db);
-        batch.update(choreRef, choreUpdate);
-        batch.set(logRef, logPayload);
-        await batch.commit();
+        tx.update(choreRef, {
+          ...completionMarkers(completions),
+          currentIndex: nextIdx,
+          completions
+        });
+        // With photos the log is written after the upload finishes, since logs
+        // are append-only in the security rules and the urls cannot be patched
+        // in afterwards.
+        if (photos.length === 0) tx.set(logRef, logPayload);
+        return { ok: true as const, baseDetails, context, logPayload };
+      });
+
+      if (!result.ok) {
+        showToast(
+          result.reason === 'turn'
+            ? 'ניתן לסמן בוצע רק בתור שלך'
+            : result.reason === 'done'
+              ? 'המשימה כבר סומנה כבוצעה ליום זה'
+              : 'המשימה לא נמצאה'
+        );
         setPendingDoneChoreId(null);
         return;
       }
 
-      // Mark the chore done right away, then upload in the background. Logs are
-      // append-only in the security rules, so the photo urls have to be part of
-      // the initial write rather than patched in afterwards.
-      await updateDoc(choreRef, choreUpdate);
       setPendingDoneChoreId(null);
+      if (photos.length === 0) return;
+
+      const { baseDetails, context, logPayload } = result;
       uploadTaskProofs(householdId, logId, photos)
         .then(
           (photoUrls) => ({
@@ -721,38 +746,55 @@ export default function ChoresApp() {
   };
 
   const handleUndoDone = async (choreId: string) => {
-    if (!householdId) return;
+    if (!householdId || actionBusy) return;
     const chore = chores.find(c => c.id === choreId);
     if (!chore) return;
 
-    const assignment = resolveDayAssignee(chore, users, selectedDate, today);
-    if (!assignment.done) return;
+    const preview = resolveDayAssignee(chore, users, selectedDate, today);
+    if (!preview.done) return;
     // The turn goes back to whoever the completion was recorded against; only
     // that person (or an admin) may undo it.
-    if (!isAdmin && assignment.completedBy !== currentUserId) {
+    if (!isAdmin && preview.completedBy !== currentUserId) {
       showToast('ניתן לבטל סימון רק בתור שלך');
       return;
     }
 
-    const restoredIdx = assignment.index >= 0 ? assignment.index : chore.currentIndex;
-    const nextIndex = currentIndexAfterUndo(chore, selectedDate, restoredIdx, today);
-    const completions = withoutCompletion(chore, selectedDate, today);
-
+    const choreRef = doc(db, 'households', householdId, 'chores', choreId);
+    setActionBusy(true);
     try {
-      await updateDoc(doc(db, 'households', householdId, 'chores', choreId), {
-        ...completionMarkers(completions),
-        currentIndex: nextIndex,
-        completions
+      const result = await runTransaction(db, async (tx) => {
+        const snap = await tx.get(choreRef);
+        if (!snap.exists()) return null;
+        const fresh = { id: snap.id, ...snap.data() } as Chore;
+        const assignment = resolveDayAssignee(fresh, users, selectedDate, today);
+        if (!assignment.done) return null;
+        if (!isAdmin && assignment.completedBy !== currentUserId) return null;
+
+        const restoredIdx = assignment.index >= 0 ? assignment.index : fresh.currentIndex;
+        const nextIndex = currentIndexAfterUndo(fresh, selectedDate, restoredIdx, today);
+        const completions = withoutCompletion(fresh, selectedDate, today);
+        tx.update(choreRef, {
+          ...completionMarkers(completions),
+          currentIndex: nextIndex,
+          completions
+        });
+        return { restoredIdx, nextIndex, rotation: fresh.rotation, name: fresh.name };
       });
+
+      if (!result) return;
       await logAction(
         'ביטול משימה',
-        joinDetails(`ביטל/ה את סימון "${chore.name}"`, [
-          nextIndex === restoredIdx ? `התור חוזר ל${nameOf(chore.rotation[restoredIdx])}` : null
+        joinDetails(`ביטל/ה את סימון "${result.name}"`, [
+          result.nextIndex === result.restoredIdx
+            ? `התור חוזר ל${nameOf(result.rotation[result.restoredIdx])}`
+            : null
         ])
       );
     } catch (err) {
       console.error(err);
       showToast('ביטול הסימון נכשל');
+    } finally {
+      setActionBusy(false);
     }
   };
 
@@ -760,30 +802,38 @@ export default function ChoresApp() {
   // resident who was passed over and leaves the completion markers alone,
   // exactly as the skip itself did.
   const handleUndoSkip = async (choreId: string) => {
-    if (!householdId || !isAdmin) return;
+    if (!householdId || !isAdmin || actionBusy) return;
     const chore = chores.find(c => c.id === choreId);
     if (!chore) return;
+    if (!resolveDayAssignee(chore, users, selectedDate, today).skippedBy) return;
 
-    const assignment = resolveDayAssignee(chore, users, selectedDate, today);
-    const skippedBy = assignment.skippedBy;
-    if (!skippedBy) return;
-    const restoredIdx = chore.rotation.indexOf(skippedBy);
-    const nextIndex =
-      restoredIdx >= 0
-        ? currentIndexAfterUndo(chore, selectedDate, restoredIdx, today)
-        : chore.currentIndex;
-    const completions = withoutCompletion(chore, selectedDate, today);
-
+    const choreRef = doc(db, 'households', householdId, 'chores', choreId);
     setActionBusy(true);
     try {
-      await updateDoc(doc(db, 'households', householdId, 'chores', choreId), {
-        currentIndex: nextIndex,
-        completions
+      const result = await runTransaction(db, async (tx) => {
+        const snap = await tx.get(choreRef);
+        if (!snap.exists()) return null;
+        const fresh = { id: snap.id, ...snap.data() } as Chore;
+        const skippedBy = resolveDayAssignee(fresh, users, selectedDate, today).skippedBy;
+        if (!skippedBy) return null;
+
+        const restoredIdx = fresh.rotation.indexOf(skippedBy);
+        const nextIndex =
+          restoredIdx >= 0
+            ? currentIndexAfterUndo(fresh, selectedDate, restoredIdx, today)
+            : fresh.currentIndex;
+        tx.update(choreRef, {
+          currentIndex: nextIndex,
+          completions: withoutCompletion(fresh, selectedDate, today)
+        });
+        return { skippedBy, restoredIdx, nextIndex, name: fresh.name };
       });
+
+      if (!result) return;
       await logAction(
         'ביטול דילוג',
-        joinDetails(`ביטל/ה את הדילוג על "${chore.name}"`, [
-          nextIndex === restoredIdx ? `התור חוזר ל${nameOf(skippedBy)}` : null
+        joinDetails(`ביטל/ה את הדילוג על "${result.name}"`, [
+          result.nextIndex === result.restoredIdx ? `התור חוזר ל${nameOf(result.skippedBy)}` : null
         ])
       );
     } catch (err) {
@@ -800,34 +850,52 @@ export default function ChoresApp() {
     if (!chore) return;
     // Skip the day being viewed, not "today", so a skip matches what the card
     // showed. The day stays open; only the turn moves on.
-    const assignment = resolveDayAssignee(chore, users, selectedDate, today);
-    if (assignment.done) {
+    const preview = resolveDayAssignee(chore, users, selectedDate, today);
+    if (preview.done) {
       showToast('המשימה כבר סומנה כבוצעה ליום זה');
       return;
     }
-    const skippedUserId = assignment.userId;
-    if (!skippedUserId) return;
+    if (!preview.userId) return;
+
+    const choreRef = doc(db, 'households', householdId, 'chores', choreId);
     const isFutureDay = normalizeDay(selectedDate).getTime() > normalizeDay(today).getTime();
     setActionBusy(true);
     try {
-      const nextIdx = getNextActiveIndex(chore, users, assignment.index, selectedDate);
-      // Recorded so the skipped day cannot be projected back onto the person
-      // whose turn was passed over. A skip is not a completion, so the
-      // lastCompletedAt markers deliberately stay untouched.
-      const completions = withCompletion(
-        chore,
-        selectedDate,
-        { userId: skippedUserId, at: new Date().toISOString(), skipped: true },
-        today
-      );
-      await updateDoc(doc(db, 'households', householdId, 'chores', choreId), {
-        currentIndex: isFutureDay ? chore.currentIndex : nextIdx,
-        completions
+      const result = await runTransaction(db, async (tx) => {
+        const snap = await tx.get(choreRef);
+        if (!snap.exists()) return null;
+        const fresh = { id: snap.id, ...snap.data() } as Chore;
+        const assignment = resolveDayAssignee(fresh, users, selectedDate, today);
+        if (assignment.done) return { done: true as const };
+        const skippedUserId = assignment.userId;
+        if (!skippedUserId) return null;
+
+        const nextIdx = getNextActiveIndex(fresh, users, assignment.index, selectedDate);
+        // Recorded so the skipped day cannot be projected back onto the person
+        // whose turn was passed over. A skip is not a completion, so the
+        // lastCompletedAt markers deliberately stay untouched.
+        tx.update(choreRef, {
+          currentIndex: isFutureDay ? fresh.currentIndex : nextIdx,
+          completions: withCompletion(
+            fresh,
+            selectedDate,
+            { userId: skippedUserId, at: new Date().toISOString(), skipped: true },
+            today
+          )
+        });
+        return { done: false as const, skippedUserId, nextIdx, rotation: fresh.rotation, name: fresh.name };
       });
+
+      if (!result) return;
+      if (result.done) {
+        showToast('המשימה כבר סומנה כבוצעה ליום זה');
+        setPendingSkipChoreId(null);
+        return;
+      }
       await logAction(
         'דילוג משימה',
-        joinDetails(`דילג/ה על "${chore.name}"`, [
-          `התור עובר מ${nameOf(skippedUserId)} ל${nameOf(chore.rotation[nextIdx])}`
+        joinDetails(`דילג/ה על "${result.name}"`, [
+          `התור עובר מ${nameOf(result.skippedUserId)} ל${nameOf(result.rotation[result.nextIdx])}`
         ])
       );
       setPendingSkipChoreId(null);
