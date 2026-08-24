@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback, useMemo } from 'react';
+import { useState, useEffect, useCallback, useMemo, useRef } from 'react';
 import { db, auth } from './firebase';
 import {
   collection,
@@ -17,6 +17,7 @@ import {
   signOut,
   User as FirebaseUser
 } from 'firebase/auth';
+import { describeAuthError } from './auth-errors';
 import {
   activeHouseholdStorageKey,
   generateHouseholdId,
@@ -85,6 +86,11 @@ export async function ensureLoginProfile(householdId: string, user: FirebaseUser
 export function useAuth() {
   const [user, setUser] = useState<FirebaseUser | null>(null);
   const [loading, setLoading] = useState(true);
+  const [loggingIn, setLoggingIn] = useState(false);
+  // A ref, not the state above: two clicks in the same tick would both read a
+  // stale `false` from state and open a second popup, which makes Firebase
+  // reject the first with auth/cancelled-popup-request.
+  const loginInFlight = useRef(false);
 
   useEffect(() => {
     return onAuthStateChanged(auth, (u) => {
@@ -94,12 +100,20 @@ export function useAuth() {
   }, []);
 
   const login = async () => {
+    if (loginInFlight.current) return;
+    loginInFlight.current = true;
+    setLoggingIn(true);
     try {
       const provider = new GoogleAuthProvider();
       await signInWithPopup(auth, provider);
     } catch (error) {
-      console.error('Login error:', error);
+      // A cancelled popup is a choice, not a fault, and does not belong in the
+      // console next to real failures.
+      if (describeAuthError(error)) console.error('Login error:', error);
       throw error;
+    } finally {
+      loginInFlight.current = false;
+      setLoggingIn(false);
     }
   };
 
@@ -112,7 +126,7 @@ export function useAuth() {
     }
   };
 
-  return { user, loading, login, logout };
+  return { user, loading, loggingIn, login, logout };
 }
 
 export function useHousehold(user: FirebaseUser | null | undefined) {

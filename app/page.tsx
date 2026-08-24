@@ -55,6 +55,7 @@ import {
 import { WeekOverview } from '../components/WeekOverview';
 import type { WeekPerson, WeekRow } from '../components/WeekOverview';
 import { householdDisplayName, profileStorageKey } from '../lib/household-utils';
+import { describeAuthError } from '../lib/auth-errors';
 import { describeChoreChanges, frequencyLabel, joinDetails, clampDetails } from '../lib/activity';
 import type { ChoreFrequency } from '../lib/activity';
 import {
@@ -184,7 +185,7 @@ const DEFAULT_ACTION_STYLE = { Icon: Activity, className: 'bg-[#F5F1EA] text-[#8
 // --- Main App Component ---
 export default function ChoresApp() {
   const { showToast } = useToast();
-  const { user, loading: authLoading, login, logout } = useAuth();
+  const { user, loading: authLoading, loggingIn, login, logout } = useAuth();
   const {
     households,
     householdId,
@@ -413,8 +414,14 @@ export default function ChoresApp() {
         <h1 className="text-3xl font-extrabold text-[#3D3732] mb-2 tracking-tight">תורנויות הבית</h1>
         <p className="text-[#8C7E6A] mb-10 max-w-xs">התחבר כדי לנהל את מטלות הבית שלכם בסנכרון מלא לכל בני המשפחה.</p>
         <button 
-          onClick={() => login().catch(() => showToast('ההתחברות נכשלה. נסה שוב.'))}
-          className="flex items-center gap-3 bg-white border border-[#E6E0D4] px-8 py-4 rounded-2xl shadow-sm text-[#4A443F] font-bold hover:bg-[#F5F1EA] transition-all active:scale-95"
+          onClick={() =>
+            login().catch((err) => {
+              const message = describeAuthError(err);
+              if (message) showToast(message);
+            })
+          }
+          disabled={loggingIn}
+          className="flex items-center gap-3 bg-white border border-[#E6E0D4] px-8 py-4 rounded-2xl shadow-sm text-[#4A443F] font-bold hover:bg-[#F5F1EA] transition-all active:scale-95 disabled:opacity-60 disabled:pointer-events-none"
         >
           <svg width="24" height="24" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
             <path d="M22.56 12.25c0-.78-.07-1.53-.2-2.25H12v4.26h5.92c-.26 1.37-1.04 2.53-2.21 3.31v2.77h3.57c2.08-1.92 3.28-4.74 3.28-8.09z" fill="#4285F4"/>
@@ -422,7 +429,7 @@ export default function ChoresApp() {
             <path d="M5.84 14.09c-.22-.66-.35-1.36-.35-2.09s.13-1.43.35-2.09V7.07H2.18C1.43 8.55 1 10.22 1 12s.43 3.45 1.18 4.93l2.85-2.22.81-.62z" fill="#FBBC05"/>
             <path d="M12 5.38c1.62 0 3.06.56 4.21 1.64l3.15-3.15C17.45 2.09 14.97 1 12 1 7.7 1 3.99 3.47 2.18 7.07l3.66 2.84c.87-2.6 3.3-4.53 6.16-4.53z" fill="#EA4335"/>
           </svg>
-          התחבר עם גוגל
+          {loggingIn ? 'מתחבר...' : 'התחבר עם גוגל'}
         </button>
       </div>
     );
