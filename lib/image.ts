@@ -4,7 +4,9 @@ export async function compressImage(
   maxEdge = 1280,
   quality = 0.72
 ): Promise<Blob> {
-  const bitmap = await createImageBitmap(file);
+  // Camera photos carry their rotation in EXIF. Browsers disagree on the
+  // default, so ask for the baked-in orientation explicitly.
+  const bitmap = await createImageBitmap(file, { imageOrientation: 'from-image' });
   const scale = Math.min(1, maxEdge / Math.max(bitmap.width, bitmap.height));
   const width = Math.max(1, Math.round(bitmap.width * scale));
   const height = Math.max(1, Math.round(bitmap.height * scale));

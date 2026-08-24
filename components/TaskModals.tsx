@@ -56,24 +56,29 @@ export function PhotoPicker({ disabled, max = MAX_PROOF_PHOTOS, onChange }: Phot
     if (room <= 0) return;
     if (files.length > room) setError(`אפשר לצרף עד ${max} תמונות`);
 
-    const accepted: PickedPhoto[] = [];
+    // The file travels with its item: rejected files leave gaps, so the index
+    // into `files` stops matching the accepted list after the first rejection.
+    const accepted: { item: PickedPhoto; file: File }[] = [];
     for (const file of files.slice(0, room)) {
       const validationError = validateProofFile(file);
       if (validationError) {
         setError(validationError);
         continue;
       }
-      accepted.push({ id: crypto.randomUUID(), preview: URL.createObjectURL(file), blob: null });
+      accepted.push({
+        item: { id: crypto.randomUUID(), preview: URL.createObjectURL(file), blob: null },
+        file
+      });
     }
     if (accepted.length === 0) return;
 
-    setItems(prev => [...prev, ...accepted]);
+    setItems(prev => [...prev, ...accepted.map(a => a.item)]);
     setPending(p => p + accepted.length);
 
     await Promise.all(
-      accepted.map(async (item, i) => {
+      accepted.map(async ({ item, file }) => {
         try {
-          const compressed = await compressImage(files[i]);
+          const compressed = await compressImage(file);
           setItems(prev => prev.map(x => (x.id === item.id ? { ...x, blob: compressed } : x)));
         } catch (err) {
           console.error(err);
