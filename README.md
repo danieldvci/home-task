@@ -45,6 +45,11 @@ Open [http://localhost:3000](http://localhost:3000).
 | `npm start` | Run production build |
 | `npm run lint` | ESLint |
 
+## Roadmap
+
+Deferred features, the market comparison behind them, and the limitations kept
+on purpose are in [ROADMAP.md](ROADMAP.md).
+
 ## Deploy
 
 This is a Next.js app. Typical hosts: **Vercel** or **Netlify** (Next runtime). Point Firebase Auth authorized domains at your production URL.
