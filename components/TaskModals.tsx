@@ -595,7 +595,10 @@ export function SwapTurnModal({ choreName, candidates, busy, onConfirm, onCancel
 
 type DeleteLogProps = {
   details: string;
-  olderCountHint?: number;
+  /** Real number of entries at or before this one; null while it is counted. */
+  olderCount: number | null;
+  /** Most that one run will delete, oldest of the batch left for a repeat run. */
+  maxPerRun: number;
   busy?: boolean;
   onDeleteOne: () => void;
   onDeleteOlder: () => void;
@@ -604,12 +607,20 @@ type DeleteLogProps = {
 
 export function DeleteLogConfirmModal({
   details,
-  olderCountHint,
+  olderCount,
+  maxPerRun,
   busy,
   onDeleteOne,
   onDeleteOlder,
   onCancel
 }: DeleteLogProps) {
+  const counting = olderCount === null;
+  const capped = olderCount !== null && olderCount > maxPerRun;
+  const olderLabel = counting
+    ? 'סופר רשומות...'
+    : capped
+      ? `מחק ${maxPerRun} רשומות (מתוך ${olderCount})`
+      : `מחק רשומה זו ואת כל הישנות (${olderCount})`;
   return (
     <div className="fixed inset-0 z-50 flex items-end sm:items-center justify-center bg-black/40 p-4">
       <motion.div
@@ -634,6 +645,7 @@ export function DeleteLogConfirmModal({
 
         <p className="text-sm text-[#6B5E4C]">
           אפשר למחוק רק את הרשומה הזו, או גם את כל הרשומות הישנות ממנה (כולל אותה).
+          {capped && ` המחיקה מוגבלת ל-${maxPerRun} רשומות בפעולה אחת, אפשר לחזור עליה שוב.`}
         </p>
 
         <div className="flex flex-col gap-2">
@@ -648,16 +660,12 @@ export function DeleteLogConfirmModal({
           </button>
           <button
             type="button"
-            disabled={busy}
+            disabled={busy || counting}
             onClick={onDeleteOlder}
             className="w-full flex items-center justify-center gap-2 py-3 border border-rose-200 text-rose-600 bg-rose-50 rounded-2xl font-bold disabled:opacity-40 hover:bg-rose-100 transition-colors"
           >
             <Trash2 className="w-4 h-4" />
-            {busy
-              ? 'מוחק...'
-              : olderCountHint && olderCountHint > 1
-              ? `מחק רשומה זו ואת כל הישנות (${olderCountHint})`
-              : 'מחק רשומה זו ואת כל הישנות'}
+            {busy ? 'מוחק...' : olderLabel}
           </button>
           <button
             type="button"

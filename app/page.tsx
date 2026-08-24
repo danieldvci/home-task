@@ -33,7 +33,7 @@ import type { LucideIcon } from 'lucide-react';
 import { motion, AnimatePresence } from 'motion/react';
 import { useAuth, useHousehold } from '../lib/hooks';
 import { db } from '../lib/firebase';
-import { collection, doc, onSnapshot, setDoc, deleteDoc, updateDoc, query, orderBy, limit, writeBatch, runTransaction, getDocs, where } from 'firebase/firestore';
+import { collection, doc, onSnapshot, setDoc, deleteDoc, updateDoc, query, orderBy, limit, writeBatch, runTransaction, getDocs, getCountFromServer, where } from 'firebase/firestore';
 import {
   MAX_PROOF_PHOTOS,
   uploadTaskProofs,
@@ -136,6 +136,9 @@ type LogWrite = {
 
 const MANUAL_LOG_ACTION = 'רישום ידני';
 
+/** Ceiling on one delete-older run, so a mis-tap cannot clear years at once. */
+const DELETE_OLDER_MAX = 200;
+
 const photoLabel = (count: number) => (count > 1 ? `צורפו ${count} תמונות` : 'צורפה תמונה');
 
 /** All photos on a log, tolerating records that only carry the legacy field. */
@@ -224,6 +227,9 @@ export default function ChoresApp() {
 
   // Day Selector (0 = Sunday, 1 = Monday ...)
   const today = new Date();
+  // Re-derived on every clock tick, so anything keyed off it rolls over at
+  // midnight without a reload.
+  const todayStr = today.toDateString();
   const [selectedDate, setSelectedDate] = useState<Date>(today);
   const selectedDayIndex = selectedDate.getDay();
   const selectedDateStr = selectedDate.toDateString();
@@ -245,6 +251,8 @@ export default function ChoresApp() {
   const [pendingSkipChoreId, setPendingSkipChoreId] = useState<string | null>(null);
   const [pendingSwapChoreId, setPendingSwapChoreId] = useState<string | null>(null);
   const [pendingDeleteLogId, setPendingDeleteLogId] = useState<string | null>(null);
+  /** Real number of logs at or before the pending entry; null while counting. */
+  const [deleteOlderCount, setDeleteOlderCount] = useState<number | null>(null);
   const [composingManualLog, setComposingManualLog] = useState(false);
   const [quickTaskSourceId, setQuickTaskSourceId] = useState<string | null>(null);
   const [actionBusy, setActionBusy] = useState(false);
@@ -335,9 +343,10 @@ export default function ChoresApp() {
 
   // If browser reminders are enabled, nudge the acting resident once per day
   // about chores that are their turn today and not yet done.
+  // todayStr is in the dependencies so a tab left open overnight reminds again
+  // on the new day instead of staying silent.
   useEffect(() => {
     if (!remindersOn || !currentUserId || chores.length === 0) return;
-    const todayStr = today.toDateString();
     const myUndoneToday = chores
       .filter(c => choreOccursOnDate(c, today, today))
       .filter(c => {
@@ -349,7 +358,33 @@ export default function ChoresApp() {
       maybeShowTurnReminder(todayStr, currentUserId, myUndoneToday);
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [remindersOn, currentUserId, chores, users]);
+  }, [remindersOn, currentUserId, chores, users, todayStr]);
+
+  // The delete-older confirmation used to count the 50 loaded logs, which said
+  // "3" while the query behind the button would have deleted hundreds. Ask the
+  // server for the real total instead.
+  const pendingDeleteTimestamp = logs.find(l => l.id === pendingDeleteLogId)?.timestamp ?? null;
+  useEffect(() => {
+    if (!householdId || !pendingDeleteTimestamp) {
+      setDeleteOlderCount(null);
+      return;
+    }
+    let cancelled = false;
+    setDeleteOlderCount(null);
+    getCountFromServer(
+      query(
+        collection(db, 'households', householdId, 'logs'),
+        where('timestamp', '<=', pendingDeleteTimestamp)
+      )
+    )
+      .then(snap => {
+        if (!cancelled) setDeleteOlderCount(snap.data().count);
+      })
+      .catch(err => console.error('[logs] count failed:', err));
+    return () => {
+      cancelled = true;
+    };
+  }, [householdId, pendingDeleteTimestamp]);
 
   // Open the (hidden) file picker whenever an avatar upload is requested.
   // Kept in an effect (rather than the click handlers) so the ref is only
@@ -536,15 +571,19 @@ export default function ChoresApp() {
     }
   };
 
-  // Deletes the chosen entry and every log at or before its timestamp,
-  // including entries outside the 50-item history window currently loaded.
+  // Deletes the chosen entry and the entries just before it, including ones
+  // outside the 50-item history window currently loaded. Capped per run so a
+  // mis-tap cannot wipe years of history; the modal shows the real total and
+  // how much of it this run will take.
   const handleDeleteLogAndOlder = async (log: LogType) => {
     if (!householdId || !isAdmin) return;
     setActionBusy(true);
     try {
       const olderQuery = query(
         collection(db, 'households', householdId, 'logs'),
-        where('timestamp', '<=', log.timestamp)
+        where('timestamp', '<=', log.timestamp),
+        orderBy('timestamp', 'desc'),
+        limit(DELETE_OLDER_MAX)
       );
       const snap = await getDocs(olderQuery);
       const docs = snap.docs;
@@ -555,7 +594,10 @@ export default function ChoresApp() {
         await batch.commit();
       }
       setPendingDeleteLogId(null);
-      if (docs.length > 1) {
+      const remaining = (deleteOlderCount ?? docs.length) - docs.length;
+      if (remaining > 0) {
+        showToast(`נמחקו ${docs.length} רשומות, נותרו ${remaining} ישנות יותר`);
+      } else if (docs.length > 1) {
         showToast(`נמחקו ${docs.length} רשומות`);
       }
     } catch (err) {
@@ -1325,9 +1367,6 @@ export default function ChoresApp() {
   const pendingSkipChore = chores.find(c => c.id === pendingSkipChoreId);
   const pendingSwapChore = chores.find(c => c.id === pendingSwapChoreId);
   const pendingDeleteLog = logs.find(l => l.id === pendingDeleteLogId);
-  const pendingDeleteOlderHint = pendingDeleteLog
-    ? logs.filter(l => l.timestamp <= pendingDeleteLog.timestamp).length
-    : 0;
   const quickTaskSource = chores.find(c => c.id === quickTaskSourceId);
   // Default the extra round to the person after the one who holds the day, so
   // the same resident is not asked twice in a row.
@@ -2360,7 +2399,7 @@ export default function ChoresApp() {
             <div className="flex items-center justify-between pt-2 border-t border-[#E6E0D4]">
               <div>
                 <p className="text-sm font-medium text-[#3D3732]">תזכורות בדפדפן</p>
-                <p className="text-xs text-[#8C7E6A]">קבל תזכורת כשהתור שלך היום ולא בוצע (בזמן שהאפליקציה פתוחה/מותקנת)</p>
+                <p className="text-xs text-[#8C7E6A]">קבל תזכורת כשהתור שלך היום ולא בוצע. התזכורת מופיעה רק כשהאפליקציה פתוחה — אין התראות ברקע.</p>
               </div>
               <button
                 onClick={async () => {
@@ -2769,7 +2808,8 @@ export default function ChoresApp() {
       {pendingDeleteLog && (
         <DeleteLogConfirmModal
           details={pendingDeleteLog.details}
-          olderCountHint={pendingDeleteOlderHint}
+          olderCount={deleteOlderCount}
+          maxPerRun={DELETE_OLDER_MAX}
           busy={actionBusy}
           onDeleteOne={() => handleDeleteLog(pendingDeleteLog.id)}
           onDeleteOlder={() => handleDeleteLogAndOlder(pendingDeleteLog)}

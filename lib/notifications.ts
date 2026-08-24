@@ -41,7 +41,6 @@ export async function maybeShowTurnReminder(dateKey: string, userId: string, cho
   if (!remindersEnabled() || choreNames.length === 0) return;
   const key = `${REMINDER_SHOWN_KEY_PREFIX}${userId}_${dateKey}`;
   if (localStorage.getItem(key) === '1') return;
-  localStorage.setItem(key, '1');
 
   const title = 'תורנויות הבית';
   const body =
@@ -49,15 +48,19 @@ export async function maybeShowTurnReminder(dateKey: string, userId: string, cho
       ? `היום התור שלך ב: ${choreNames[0]}`
       : `היום התור שלך ב-${choreNames.length} משימות: ${choreNames.join(', ')}`;
 
+  // The "already shown today" flag is only set once a notification actually
+  // appeared; setting it up front turned a single failure into a silent day.
   try {
     if ('serviceWorker' in navigator) {
       const reg = await navigator.serviceWorker.getRegistration();
       if (reg) {
         await reg.showNotification(title, { body, icon: '/icons/icon-192.png' });
+        localStorage.setItem(key, '1');
         return;
       }
     }
     new Notification(title, { body, icon: '/icons/icon-192.png' });
+    localStorage.setItem(key, '1');
   } catch (err) {
     console.error('[reminders] failed to show notification:', err);
   }
