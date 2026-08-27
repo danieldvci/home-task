@@ -20,6 +20,10 @@ export type ChoreCompletion = {
   // A skipped day is resolved but not done: the turn moved past `userId` and
   // the occurrence stays open for whoever comes next.
   skipped?: boolean;
+  // A cancelled day is closed without being done. Skipping only hands the turn
+  // on and leaves the day owed, so without this an occurrence nobody ever
+  // completes stays outstanding for good.
+  cancelled?: boolean;
 };
 
 export type Chore = {
@@ -40,6 +44,9 @@ export type Chore = {
   // Day the schedule counts from, set once at creation. Without it a weekly
   // chore has nothing stable to repeat from.
   anchorDate?: string | null;
+  // First day the chore exists. Documents written before this field means the
+  // schedule has no lower bound, which is the pre-startDate behaviour.
+  startDate?: string | null;
 };
 
 // Structural subset of the app's UserType, so any richer profile works here.
@@ -130,7 +137,20 @@ export const choreAnchorDate = (chore: Chore, fallback: Date) => {
   return normalizeDay(fallback);
 };
 
+/** First day the chore exists, or null when it has always existed. */
+export const choreStartDate = (chore: Chore) => {
+  const start = parseTime(chore.startDate);
+  return start === null ? null : normalizeDay(new Date(start));
+};
+
 export const choreOccursOnDate = (chore: Chore, date: Date, fallbackAnchor: Date) => {
+  // A chore cannot have been due before it existed, so the days already gone by
+  // in the week it was created are not occurrences it missed. Gating here means
+  // every reader inherits it: the two views, the occurrence walk, and the
+  // rotation projection that consumes a turn per open occurrence.
+  const start = choreStartDate(chore);
+  if (start !== null && normalizeDay(date).getTime() < start.getTime()) return false;
+
   if (chore.frequency === 'daily') return true;
   if (chore.frequency === 'once') {
     return !!chore.onceDate && dayKey(new Date(chore.onceDate)) === dayKey(date);
@@ -259,9 +279,10 @@ export type ResolvedCompletion = {
   // done but not by whom.
   inferred: boolean;
   skipped: boolean;
+  cancelled: boolean;
 };
 
-// Any recorded outcome for the day, completed or skipped.
+// Any recorded outcome for the day: completed, skipped or cancelled.
 export const getDayRecord = (chore: Chore, day: Date): ResolvedCompletion | null => {
   const key = dayKey(day);
   const entry = chore.completions?.[key];
@@ -272,7 +293,8 @@ export const getDayRecord = (chore: Chore, day: Date): ResolvedCompletion | null
       logId: entry.logId ?? null,
       at: entry.at ?? null,
       inferred: false,
-      skipped: !!entry.skipped
+      skipped: !!entry.skipped,
+      cancelled: !!entry.cancelled
     };
   }
   // Once a chore carries a completions map it is the only source of truth;
@@ -285,16 +307,20 @@ export const getDayRecord = (chore: Chore, day: Date): ResolvedCompletion | null
       logId: chore.lastCompletedLogId ?? null,
       at: chore.lastCompletedAt,
       inferred: true,
-      skipped: false
+      skipped: false,
+      cancelled: false
     };
   }
   return null;
 };
 
-/** Only days that were actually completed; a skipped day is still open. */
+/**
+ * Only days that were actually completed. A skipped day is still open, and a
+ * cancelled one is closed without ever having been done.
+ */
 export const getCompletion = (chore: Chore, day: Date): ResolvedCompletion | null => {
   const record = getDayRecord(chore, day);
-  return record && !record.skipped ? record : null;
+  return record && !record.skipped && !record.cancelled ? record : null;
 };
 
 export const isDoneOnDay = (chore: Chore, day: Date) => getCompletion(chore, day) !== null;
@@ -362,7 +388,7 @@ export const dayKeyToDate = (key: string) => {
 // newest entry so the two representations can never disagree.
 export const completionMarkers = (completions: Record<string, ChoreCompletion>) => {
   const keys = Object.keys(completions)
-    .filter(key => !completions[key].skipped)
+    .filter(key => !completions[key].skipped && !completions[key].cancelled)
     .sort();
   const newest = keys[keys.length - 1];
   if (!newest) return { lastCompletedAt: null, lastCompletedLogId: null };
@@ -405,6 +431,9 @@ export const projectAssigneeIndex = (
       const recorded = record.userId ? chore.rotation.indexOf(record.userId) : -1;
       // A skip resolves the day onto the next available resident and, like a
       // completion, takes no turn of its own: the pointer already moved.
+      // A cancelled day falls through to the branch below and behaves like a
+      // completion here: it re-anchors on the resident who owed it and consumes
+      // no turn, so writing a day off never hands the same turn out twice.
       if (record.skipped) {
         if (recorded >= 0) index = getActiveAssigneeIndex(chore, users, recorded + 1, day);
         else if (index === -1) index = getActiveAssigneeIndex(chore, users, startIndex, day);
@@ -449,6 +478,8 @@ export type DayAssignment = {
   inferred: boolean;
   // Resident whose turn was skipped on this day, if any.
   skippedBy: string | null;
+  // Resident the day was owed by when it was closed without being done.
+  cancelledBy: string | null;
   // Nobody in the rotation is available, so `userId` is a placeholder.
   everyoneAway: boolean;
 };
@@ -461,7 +492,25 @@ export const resolveDayAssignee = (
   today: Date = new Date()
 ): DayAssignment => {
   const record = getDayRecord(chore, day);
-  const completion = record && !record.skipped ? record : null;
+  const completion = record && !record.skipped && !record.cancelled ? record : null;
+
+  // Closed without being done: the day is resolved, so it stays pinned to the
+  // resident who owed it rather than following the pointer.
+  if (record?.cancelled) {
+    const index = record.userId ? (chore.rotation?.indexOf(record.userId) ?? -1) : -1;
+    return {
+      dayKey: record.key,
+      index,
+      userId: record.userId ?? undefined,
+      done: false,
+      completedBy: null,
+      logId: record.logId,
+      inferred: false,
+      skippedBy: null,
+      cancelledBy: record.userId,
+      everyoneAway: false
+    };
+  }
 
   if (completion && completion.userId) {
     const index = chore.rotation?.indexOf(completion.userId) ?? -1;
@@ -474,6 +523,7 @@ export const resolveDayAssignee = (
       logId: completion.logId,
       inferred: false,
       skippedBy: null,
+      cancelledBy: null,
       everyoneAway: false
     };
   }
@@ -492,6 +542,7 @@ export const resolveDayAssignee = (
       logId: completion.logId,
       inferred: true,
       skippedBy: null,
+      cancelledBy: null,
       everyoneAway: false
     };
   }
@@ -506,6 +557,7 @@ export const resolveDayAssignee = (
     logId: null,
     inferred: false,
     skippedBy: record?.skipped ? record.userId : null,
+    cancelledBy: null,
     everyoneAway: isEveryoneAwayOnDay(chore, users, day)
   };
 };

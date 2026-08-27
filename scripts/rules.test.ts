@@ -287,6 +287,15 @@ async function main() {
     await assertFails(setDoc(doc(owner(), path('chores', 'chore2')), chore({ notes: 'לא קיים' })));
   });
 
+  await test('a chore may record the day it starts from', async () => {
+    await assertSucceeds(
+      setDoc(doc(owner(), path('chores', 'chore4')), chore({ startDate: '2026-08-24T00:00:00.000Z' }))
+    );
+    await assertFails(
+      setDoc(doc(owner(), path('chores', 'chore5')), chore({ startDate: 7 }))
+    );
+  });
+
   console.log('\nhousehold membership changes');
 
   await test('a newcomer adds only themselves', async () => {

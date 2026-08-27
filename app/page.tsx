@@ -56,6 +56,15 @@ import {
 import { CollapsibleSection } from '../components/CollapsibleSection';
 import { WeekOverview } from '../components/WeekOverview';
 import type { WeekPerson, WeekRow } from '../components/WeekOverview';
+import { TaskFilterSelect } from '../components/TaskFilterSelect';
+import {
+  DEFAULT_CATEGORY,
+  buildScheduleRows,
+  missedOccurrences,
+  shiftDays,
+  weekAround
+} from '../lib/schedule-view';
+import type { ScheduleFilters } from '../lib/schedule-view';
 import { householdDisplayName, profileStorageKey } from '../lib/household-utils';
 import { describeAuthError } from '../lib/auth-errors';
 import { describeChoreChanges, frequencyLabel, joinDetails, clampDetails } from '../lib/activity';
@@ -176,6 +185,8 @@ const ACTION_STYLES: Record<string, { Icon: LucideIcon; className: string }> = {
   'דילוג משימה': { Icon: FastForward, className: 'bg-[#3D5A80]/15 text-[#3D5A80]' },
   'ביטול דילוג': { Icon: RotateCcw, className: 'bg-[#3D5A80]/15 text-[#3D5A80]' },
   'החלפת תור': { Icon: Repeat, className: 'bg-[#7B6CA8]/20 text-[#5C4F86]' },
+  'סגירת יום ללא ביצוע': { Icon: X, className: 'bg-[#8C7E6A]/20 text-[#6B5E4C]' },
+  'ביטול סגירת יום': { Icon: RotateCcw, className: 'bg-[#8C7E6A]/20 text-[#6B5E4C]' },
   'יצירת משימה': { Icon: Plus, className: 'bg-[#A1C181]/20 text-[#5F7A45]' },
   'עריכת משימה': { Icon: Pencil, className: 'bg-[#8C7E6A]/20 text-[#6B5E4C]' },
   'מחיקת משימה': { Icon: Trash2, className: 'bg-rose-100 text-rose-600' },
@@ -210,11 +221,12 @@ export default function ChoresApp() {
   const [pickedProfile, setPickedProfile] = useState<{ scope: string; id: string } | null>(null);
   const [activeTab, setActiveTab] = useState<'tasks' | 'history' | 'settings'>('tasks');
   const [selectedUserId, setSelectedUserId] = useState<string | 'all'>('my_tasks');
-  const [selectedChoreFilter, setSelectedChoreFilter] = useState<string | 'all'>('all');
   const [selectedCategoryFilter, setSelectedCategoryFilter] = useState<string | 'all'>('all');
   const [tasksView, setTasksView] = useState<'day' | 'week'>('day');
-  // Empty means "all chores"; otherwise only these rows show in the week view.
-  const [weekChoreIds, setWeekChoreIds] = useState<string[]>([]);
+  // Shared by both views: the day list and the week grid used to keep separate
+  // task filters, so switching between them changed which tasks were on screen.
+  // Empty means "all chores".
+  const [choreFilterIds, setChoreFilterIds] = useState<string[]>([]);
   const isAdmin = !!user && household?.ownerId === user.uid;
   const adminOnlyTitle = isAdmin ? undefined : ADMIN_ONLY_HINT;
   const adminDisabledClass = 'disabled:opacity-40 disabled:pointer-events-none';
@@ -496,16 +508,10 @@ export default function ChoresApp() {
     return d;
   });
 
-  // Current calendar week, Sunday through Saturday, for the week overview.
-  const weekDays = (() => {
-    const sunday = normalizeDay(today);
-    sunday.setDate(sunday.getDate() - sunday.getDay());
-    return Array.from({ length: 7 }).map((_, i) => {
-      const d = new Date(sunday);
-      d.setDate(sunday.getDate() + i);
-      return d;
-    });
-  })();
+  // The week containing the selected day, so the two views always describe the
+  // same stretch of time. Pinning this to `today` meant picking a date in the
+  // day view and switching to the week view showed a different week.
+  const weekDays = weekAround(selectedDate);
 
   const logAction = async (action: string, details: string, photoUrl?: string) => {
     if (!householdId || !currentUserId || !user) return;
@@ -858,6 +864,99 @@ export default function ChoresApp() {
     } catch (err) {
       console.error(err);
       showToast('ביטול הסימון נכשל');
+    } finally {
+      setActionBusy(false);
+    }
+  };
+
+  // Closes a day that was never done, so it stops being owed. Skipping only
+  // hands the turn on and leaves the day open, so without this an occurrence
+  // nobody ever gets to would stay outstanding for good.
+  //
+  // The pointer is deliberately untouched: an unfinished past day never held it
+  // in the first place, so writing the day off cannot move anybody's turn.
+  const cancelDay = async (choreId: string) => {
+    if (!householdId || !isAdmin || actionBusy) return;
+    const chore = chores.find(c => c.id === choreId);
+    if (!chore) return;
+
+    const preview = resolveDayAssignee(chore, users, selectedDate, today);
+    if (preview.done) {
+      showToast('המשימה כבר סומנה כבוצעה ליום זה');
+      return;
+    }
+
+    const choreRef = doc(db, 'households', householdId, 'chores', choreId);
+    setActionBusy(true);
+    try {
+      const result = await runTransaction(db, async (tx) => {
+        const snap = await tx.get(choreRef);
+        if (!snap.exists()) return null;
+        const fresh = { id: snap.id, ...snap.data() } as Chore;
+        const assignment = resolveDayAssignee(fresh, users, selectedDate, today);
+        if (assignment.done) return { done: true as const };
+        // Recorded against whoever owed the day, falling back to the admin
+        // closing it when the rotation no longer names anybody.
+        const owedBy = assignment.userId ?? currentUserId;
+        if (!owedBy) return null;
+
+        tx.update(choreRef, {
+          completions: withCompletion(
+            fresh,
+            selectedDate,
+            { userId: owedBy, at: new Date().toISOString(), cancelled: true },
+            today
+          )
+        });
+        return { done: false as const, owedBy, name: fresh.name };
+      });
+
+      if (!result) return;
+      if (result.done) {
+        showToast('המשימה כבר סומנה כבוצעה ליום זה');
+        return;
+      }
+      await logAction(
+        'סגירת יום ללא ביצוע',
+        joinDetails(`סגר/ה את "${result.name}" ללא ביצוע`, [
+          `עבור ${selectedDate.toLocaleDateString('he-IL', { day: '2-digit', month: '2-digit' })}`,
+          result.owedBy ? `היה בתורו של ${nameOf(result.owedBy)}` : null
+        ])
+      );
+    } catch (err) {
+      console.error(err);
+      showToast('סגירת היום נכשלה');
+    } finally {
+      setActionBusy(false);
+    }
+  };
+
+  const undoCancelDay = async (choreId: string) => {
+    if (!householdId || !isAdmin || actionBusy) return;
+    const chore = chores.find(c => c.id === choreId);
+    if (!chore) return;
+    if (!resolveDayAssignee(chore, users, selectedDate, today).cancelledBy) return;
+
+    const choreRef = doc(db, 'households', householdId, 'chores', choreId);
+    setActionBusy(true);
+    try {
+      const name = await runTransaction(db, async (tx) => {
+        const snap = await tx.get(choreRef);
+        if (!snap.exists()) return null;
+        const fresh = { id: snap.id, ...snap.data() } as Chore;
+        if (!resolveDayAssignee(fresh, users, selectedDate, today).cancelledBy) return null;
+        tx.update(choreRef, { completions: withoutCompletion(fresh, selectedDate, today) });
+        return fresh.name;
+      });
+
+      if (!name) return;
+      await logAction(
+        'ביטול סגירת יום',
+        `החזיר/ה את "${name}" לרשימת המשימות שלא בוצעו`
+      );
+    } catch (err) {
+      console.error(err);
+      showToast('הפעולה נכשלה');
     } finally {
       setActionBusy(false);
     }
@@ -1279,6 +1378,13 @@ export default function ChoresApp() {
       anchorDate:
         editingChoreId && existingChore
           ? choreAnchorDate(existingChore, today).toISOString()
+          : normalizeDay(today).toISOString(),
+      // A new chore starts today, so the days already gone by this week are not
+      // occurrences it missed. Carried through edits untouched, and left off
+      // chores created before the field existed so their history is unchanged.
+      startDate:
+        editingChoreId && existingChore
+          ? existingChore.startDate || null
           : normalizeDay(today).toISOString()
     };
 
@@ -1286,6 +1392,7 @@ export default function ChoresApp() {
     if (!choreData.customDays) delete (choreData as any).customDays;
     if (!choreData.category) delete (choreData as any).category;
     if (!choreData.onceDate) delete (choreData as any).onceDate;
+    if (!choreData.startDate) delete (choreData as any).startDate;
     
     try {
       if (editingChoreId) {
@@ -1453,42 +1560,11 @@ export default function ChoresApp() {
     );
   }
 
-  // Everything except one-off tasks, which belong to a single day and only make
-  // sense in the day view.
-  const recurringChores = chores.filter(c => c.frequency !== 'once');
-
   const renderTasks = () => {
     const isPastDay = normalizeDay(selectedDate).getTime() < normalizeDay(today).getTime();
-    const activeTasks = chores.map(chore => {
-      // A completed day resolves to the person who completed it; only an open
-      // day follows the rotation pointer.
-      const assignment = resolveDayAssignee(chore, users, selectedDate, today);
-      const assignee = users.find(u => u.id === assignment.userId);
-      return { chore, assignment, assignee, activeUserId: assignment.userId, activeIdx: assignment.index };
-    });
-
-    const displayTasks = activeTasks.filter(item => {
-      // Filter by selected specific chore
-      if (selectedChoreFilter !== 'all') {
-        if (item.chore.id !== selectedChoreFilter) return false;
-      }
-
-      if (selectedCategoryFilter !== 'all') {
-        if ((item.chore.category || 'אחר') !== selectedCategoryFilter) return false;
-      }
-
-      const activeFilterId = selectedUserId === 'my_tasks' ? currentUserId : selectedUserId;
-      if (activeFilterId !== 'all' && activeFilterId !== undefined) {
-        if (item.activeUserId !== activeFilterId) return false;
-      }
-
-      // Only show the chore on days it's actually scheduled to occur
-      // (daily: every day, weekly: every 7th day from today, custom_days: matching weekday).
-      if (!choreOccursOnDate(item.chore, selectedDate, today)) return false;
-      return true;
-    });
-
-    const personFilterId = selectedUserId === 'my_tasks' ? currentUserId : selectedUserId;
+    const isToday = normalizeDay(selectedDate).getTime() === normalizeDay(today).getTime();
+    const shortDate = (d: Date) =>
+      d.toLocaleDateString('he-IL', { day: '2-digit', month: '2-digit' });
     const toWeekPerson = (u: UserType): WeekPerson => ({
       id: u.id,
       name: u.name,
@@ -1496,31 +1572,47 @@ export default function ChoresApp() {
       photoURL: resolvePhoto(u)
     });
 
-    // Week matrix: same day resolution the day view uses, applied to each day of
-    // the current week. Open days are computed, completed days are read back
-    // from the completion they were frozen to.
-    // One-off tasks live on a single day and would add a near-empty row, so the
-    // matrix stays about the recurring rotation.
-    const weekRows: WeekRow[] = recurringChores
-      .filter(chore => weekChoreIds.length === 0 || weekChoreIds.includes(chore.id))
-      .map(chore => ({
-        choreId: chore.id,
-        choreName: chore.name,
-        frequencyLabel: frequencyLabel(chore.frequency, chore.customDays),
-        cells: weekDays.map(day => {
-          if (!choreOccursOnDate(chore, day, today)) return null;
-          const assignee = users.find(u => u.id === resolveDayAssignee(chore, users, day, today).userId);
-          if (!assignee) return null;
-          if (personFilterId && personFilterId !== 'all' && assignee.id !== personFilterId) return null;
-          return toWeekPerson(assignee);
+    // Both views read the same schedule through the same filters, so whatever
+    // the grid shows in a column is what the day list shows for that date.
+    const filters: ScheduleFilters = {
+      choreIds: choreFilterIds,
+      category: selectedCategoryFilter,
+      personId: selectedUserId === 'my_tasks' ? (currentUserId ?? 'all') : selectedUserId
+    };
+
+    // A row survives only when at least one of its cells is scheduled, so with a
+    // single day the cell is always present.
+    const dayEntries = buildScheduleRows(chores, users, [selectedDate], filters, today).flatMap(
+      row => {
+        const cell = row.cells[0];
+        return cell.assignment ? [{ chore: row.chore, cell, assignment: cell.assignment }] : [];
+      }
+    );
+
+    const weekRows: WeekRow[] = buildScheduleRows(chores, users, weekDays, filters, today).map(
+      row => ({
+        choreId: row.chore.id,
+        choreName: row.chore.name,
+        frequencyLabel: frequencyLabel(row.chore.frequency, row.chore.customDays),
+        cells: row.cells.map(cell => {
+          const u = users.find(x => x.id === cell.userId);
+          return { state: cell.state, person: u ? toWeekPerson(u) : null };
         })
-      }))
-      .filter(row => row.cells.some(Boolean));
+      })
+    );
 
     const weekLegendIds = new Set(
-      weekRows.flatMap(row => row.cells.filter((c): c is WeekPerson => !!c).map(c => c.id))
+      weekRows.flatMap(row => row.cells.flatMap(c => (c.person ? [c.person.id] : [])))
     );
     const weekLegend = users.filter(u => weekLegendIds.has(u.id)).map(toWeekPerson);
+
+    const weekRangeLabel = `${weekDays[0].toLocaleDateString('he-IL', { day: '2-digit', month: '2-digit' })} – ${weekDays[6].toLocaleDateString('he-IL', { day: '2-digit', month: '2-digit' })}`;
+
+    const taskFilterOptions = chores.map(c => ({
+      id: c.id,
+      label: c.name,
+      hint: frequencyLabel(c.frequency, c.customDays)
+    }));
 
     return (
       <div className="flex flex-col gap-4 pb-24">
@@ -1550,6 +1642,36 @@ export default function ChoresApp() {
           })}
         </div>
 
+        {/* Task filter, shared by both views */}
+        <TaskFilterSelect
+          options={taskFilterOptions}
+          selectedIds={choreFilterIds}
+          onChange={setChoreFilterIds}
+          allLabel="כל המשימות בבית"
+          className="mb-2"
+        />
+
+        {/* Category Filter, shared by both views */}
+        {chores.some(c => c.category) && (
+          <div className="flex gap-2 overflow-x-auto pb-1 mb-2 no-scrollbar">
+            <button
+              onClick={() => setSelectedCategoryFilter('all')}
+              className={`flex-shrink-0 px-3 py-1.5 rounded-2xl text-xs font-medium transition-all border ${selectedCategoryFilter === 'all' ? 'bg-[#6B5E4C] text-white border-[#6B5E4C]' : 'bg-white text-[#8C7E6A] border-[#E6E0D4] hover:bg-[#F3EFE9]'}`}
+            >
+              כל התחומים
+            </button>
+            {CHORE_CATEGORIES.filter(cat => chores.some(c => (c.category || DEFAULT_CATEGORY) === cat)).map(cat => (
+              <button
+                key={cat}
+                onClick={() => setSelectedCategoryFilter(cat)}
+                className={`flex-shrink-0 px-3 py-1.5 rounded-2xl text-xs font-medium transition-all border ${selectedCategoryFilter === cat ? 'bg-[#6B5E4C] text-white border-[#6B5E4C]' : 'bg-white text-[#8C7E6A] border-[#E6E0D4] hover:bg-[#F3EFE9]'}`}
+              >
+                {cat}
+              </button>
+            ))}
+          </div>
+        )}
+
         {/* Day / Week view toggle */}
         <div className="flex bg-[#F1ECE3] border border-[#E6E0D4] rounded-2xl p-1 mb-2">
           {([['day', 'יום'], ['week', 'שבוע']] as const).map(([view, label]) => (
@@ -1564,44 +1686,18 @@ export default function ChoresApp() {
         </div>
 
         {tasksView === 'week' ? (
-          <>
-            {/* Task multi-select: nothing selected means all chores */}
-            <div className="flex gap-2 overflow-x-auto pb-1 mb-2 no-scrollbar">
-              <button
-                onClick={() => setWeekChoreIds([])}
-                className={`flex-shrink-0 px-3 py-1.5 rounded-2xl text-xs font-medium transition-all border ${weekChoreIds.length === 0 ? 'bg-[#6B5E4C] text-white border-[#6B5E4C]' : 'bg-white text-[#8C7E6A] border-[#E6E0D4] hover:bg-[#F3EFE9]'}`}
-              >
-                כל המשימות
-              </button>
-              {recurringChores.map(c => {
-                const isSelected = weekChoreIds.includes(c.id);
-                return (
-                  <button
-                    key={c.id}
-                    onClick={() =>
-                      setWeekChoreIds(prev =>
-                        prev.includes(c.id) ? prev.filter(id => id !== c.id) : [...prev, c.id]
-                      )
-                    }
-                    className={`flex-shrink-0 px-3 py-1.5 rounded-2xl text-xs font-medium transition-all border ${isSelected ? 'bg-[#6B5E4C] text-white border-[#6B5E4C]' : 'bg-white text-[#8C7E6A] border-[#E6E0D4] hover:bg-[#F3EFE9]'}`}
-                  >
-                    {c.name}
-                  </button>
-                );
-              })}
-            </div>
-
-            <WeekOverview
-              days={weekDays}
-              todayStr={today.toDateString()}
-              rows={weekRows}
-              legend={weekLegend}
-              onSelectDay={(date) => {
-                setSelectedDate(date);
-                setTasksView('day');
-              }}
-            />
-          </>
+          <WeekOverview
+            days={weekDays}
+            todayStr={today.toDateString()}
+            rows={weekRows}
+            legend={weekLegend}
+            rangeLabel={weekRangeLabel}
+            onShiftWeek={(days) => setSelectedDate(shiftDays(selectedDate, days))}
+            onSelectDay={(date) => {
+              setSelectedDate(date);
+              setTasksView('day');
+            }}
+          />
         ) : (
           <>
         {/* Day Selector */}
@@ -1624,46 +1720,8 @@ export default function ChoresApp() {
           })}
         </div>
 
-        {/* Chore Filter Dropdown */}
-        <div className="relative mb-2">
-          <select
-            value={selectedChoreFilter}
-            onChange={(e) => setSelectedChoreFilter(e.target.value)}
-            className="w-full bg-white border border-[#E6E0D4] rounded-2xl px-4 py-3 text-sm font-medium text-[#6B5E4C] outline-none focus:border-[#A1C181] appearance-none shadow-sm"
-          >
-            <option value="all">כל המשימות בבית</option>
-            {recurringChores.map(c => (
-              <option key={c.id} value={c.id}>{c.name}</option>
-            ))}
-          </select>
-          <div className="absolute left-4 top-1/2 -translate-y-1/2 pointer-events-none text-[#8C7E6A]">
-            <ChevronDown className="w-4 h-4" />
-          </div>
-        </div>
-
-        {/* Category Filter */}
-        {chores.some(c => c.category) && (
-          <div className="flex gap-2 overflow-x-auto pb-1 mb-2 no-scrollbar">
-            <button
-              onClick={() => setSelectedCategoryFilter('all')}
-              className={`flex-shrink-0 px-3 py-1.5 rounded-2xl text-xs font-medium transition-all border ${selectedCategoryFilter === 'all' ? 'bg-[#6B5E4C] text-white border-[#6B5E4C]' : 'bg-white text-[#8C7E6A] border-[#E6E0D4] hover:bg-[#F3EFE9]'}`}
-            >
-              כל התחומים
-            </button>
-            {CHORE_CATEGORIES.filter(cat => chores.some(c => (c.category || 'אחר') === cat)).map(cat => (
-              <button
-                key={cat}
-                onClick={() => setSelectedCategoryFilter(cat)}
-                className={`flex-shrink-0 px-3 py-1.5 rounded-2xl text-xs font-medium transition-all border ${selectedCategoryFilter === cat ? 'bg-[#6B5E4C] text-white border-[#6B5E4C]' : 'bg-white text-[#8C7E6A] border-[#E6E0D4] hover:bg-[#F3EFE9]'}`}
-              >
-                {cat}
-              </button>
-            ))}
-          </div>
-        )}
-
         <AnimatePresence mode="popLayout">
-          {displayTasks.length === 0 ? (
+          {dayEntries.length === 0 ? (
             <motion.div 
               initial={{ opacity: 0 }} animate={{ opacity: 1 }}
               className="flex flex-col items-center justify-center py-16 text-center"
@@ -1675,9 +1733,23 @@ export default function ChoresApp() {
               <p className="text-[#8C7E6A]">הכל נקי ומסודר.</p>
             </motion.div>
           ) : (
-            displayTasks.map(({ chore, assignment, assignee, activeIdx }) => {
-              const done = assignment.done;
+            dayEntries.map(({ chore, cell, assignment }) => {
+              const assignee = users.find(u => u.id === cell.userId);
+              const activeIdx = assignment.index;
+              const done = cell.state === 'done';
+              // Nobody can take this day: the rotation is empty, everyone in it
+              // is away, or the turn landed on a profile that has been removed.
+              const unavailable = cell.state === 'unavailable';
+              const cancelled = cell.state === 'cancelled';
               const canMarkDone = isAdmin || assignee?.id === currentUserId;
+              // The rotation pointer only moves on a completion or a skip, so a
+              // turn nobody took is still owed by the same resident today. Say
+              // so on today's card, since otherwise the debt is only visible by
+              // paging back to the day it was missed.
+              const missed =
+                isToday && cell.state === 'open'
+                  ? missedOccurrences(chore, users, selectedDate, today)
+                  : [];
               // Undo returns the turn to the recorded completer, so gate the
               // button on the same person handleUndoDone will restore.
               const canUndo = isAdmin || assignment.completedBy === currentUserId;
@@ -1701,10 +1773,26 @@ export default function ChoresApp() {
                         <h3 className={`text-lg font-bold ${done ? 'text-[#6B5E4C] line-through opacity-70' : 'text-[#3D3732]'}`}>
                           {chore.name}
                         </h3>
-                        {isPastDay && !done && (
+                        {cell.state === 'overdue' && (
                           <span className="inline-flex items-center gap-1 text-[10px] font-bold text-rose-600 bg-rose-50 px-2 py-0.5 rounded-full">
-                            <AlertTriangle className="w-3 h-3" /> באיחור
+                            <AlertTriangle className="w-3 h-3" /> לא בוצע
                           </span>
+                        )}
+                        {cancelled && (
+                          <span className="inline-flex items-center gap-1 text-[10px] font-bold text-[#8C7E6A] bg-[#F1ECE3] px-2 py-0.5 rounded-full">
+                            <X className="w-3 h-3" /> נסגר ללא ביצוע
+                          </span>
+                        )}
+                        {missed.length > 0 && (
+                          <button
+                            onClick={() => setSelectedDate(missed[missed.length - 1].day)}
+                            title="עבור למועד שלא בוצע"
+                            className="inline-flex items-center gap-1 text-[10px] font-bold text-[#B9553D] bg-[#B9553D]/10 px-2 py-0.5 rounded-full hover:bg-[#B9553D]/20 transition-colors"
+                          >
+                            <AlertTriangle className="w-3 h-3" />
+                            נגרר מ־{shortDate(missed[missed.length - 1].day)}
+                            {missed.length > 1 && ` · ${missed.length} מועדים`}
+                          </button>
                         )}
                         {chore.frequency === 'once' && (
                           <span className="inline-flex items-center gap-1 text-[10px] font-bold text-[#5C4F86] bg-[#7B6CA8]/15 px-2 py-0.5 rounded-full">
@@ -1746,7 +1834,7 @@ export default function ChoresApp() {
                         {chore.category ? ` · ${chore.category}` : ''}
                       </p>
                     </div>
-                    {assignment.everyoneAway ? (
+                    {unavailable ? (
                       <div className="flex items-center gap-2 px-3 py-1.5 rounded-full bg-[#F1ECE3] text-[#8C7E6A]">
                         <UserX className="w-4 h-4" />
                         <span className="text-sm font-bold">אין דייר זמין</span>
@@ -1827,12 +1915,31 @@ export default function ChoresApp() {
                       </div>
                       {completionLog && renderReactionBar(completionLog)}
                     </div>
-                  ) : assignment.everyoneAway ? (
+                  ) : cancelled ? (
+                    <div className="flex items-center justify-between gap-2 py-3 px-4 bg-[#F5F1EA] rounded-2xl text-sm font-medium text-[#8C7E6A]">
+                      <span className="flex items-center gap-2">
+                        <X className="w-4 h-4" />
+                        היום נסגר מבלי שהמשימה בוצעה
+                      </span>
+                      {isAdmin && (
+                        <button
+                          onClick={() => undoCancelDay(chore.id)}
+                          disabled={actionBusy}
+                          className="text-xs font-bold text-[#8C7E6A] bg-white/70 hover:bg-white px-3 py-1.5 rounded-xl transition-all disabled:opacity-50"
+                        >
+                          החזר
+                        </button>
+                      )}
+                    </div>
+                  ) : unavailable ? (
                     <div className="flex items-center justify-center gap-2 py-3 px-4 bg-[#F5F1EA] rounded-2xl text-sm font-medium text-[#8C7E6A]">
                       <UserX className="w-4 h-4" />
-                      כל הדיירים בסבב נעדרים ביום זה
+                      {chore.rotation && chore.rotation.length > 0
+                        ? 'אין דייר זמין למשימה ביום זה'
+                        : 'לא הוגדרו משתתפים למשימה זו'}
                     </div>
                   ) : canMarkDone ? (
+                    <div className="flex flex-col gap-2">
                     <div className="flex gap-2">
                       <button
                         onClick={() => setPendingDoneChoreId(chore.id)}
@@ -1882,6 +1989,19 @@ export default function ChoresApp() {
                           </button>
                         </AdminHint>
                       )}
+                    </div>
+                    {/* Skipping only hands the turn on, so a day nobody ever
+                        got to needs its own way out or it stays owed for good. */}
+                    {cell.state === 'overdue' && isAdmin && (
+                      <button
+                        onClick={() => cancelDay(chore.id)}
+                        disabled={actionBusy}
+                        className="flex items-center justify-center gap-2 py-2 text-xs font-bold text-[#8C7E6A] border border-[#E6E0D4] rounded-2xl hover:bg-[#F3EFE9] active:scale-[0.98] transition-all disabled:opacity-50"
+                      >
+                        <X className="w-3.5 h-3.5" />
+                        סגור את היום ללא ביצוע
+                      </button>
+                    )}
                     </div>
                   ) : (
                     <div className="flex items-center justify-center py-3 px-4 bg-[#F5F1EA] rounded-2xl text-sm font-medium text-[#8C7E6A]">
@@ -2200,6 +2320,9 @@ export default function ChoresApp() {
   );
 
   const renderSettings = () => {
+    // One-off tasks are created and finished from the day view; they have
+    // nothing to edit here and would clutter the list as they pile up.
+    const recurringChores = chores.filter(c => c.frequency !== 'once');
     return (
       <div className="flex flex-col gap-6 pb-24">
         

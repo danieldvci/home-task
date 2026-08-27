@@ -73,9 +73,12 @@ service cloud.firestore {
       let hasAnchor = data.keys().hasAny(['anchorDate']);
       // The single day a 'once' task occurs on.
       let hasOnceDate = data.keys().hasAny(['onceDate']);
+      // First day the chore exists; days before it are not occurrences.
+      let hasStartDate = data.keys().hasAny(['startDate']);
       let baseSize = 4;
       let totalSize = baseSize + (hasCustom ? 1 : 0) + (hasLastComp ? 1 : 0) + (hasCategory ? 1 : 0)
-        + (hasLastLog ? 1 : 0) + (hasCompletions ? 1 : 0) + (hasAnchor ? 1 : 0) + (hasOnceDate ? 1 : 0);
+        + (hasLastLog ? 1 : 0) + (hasCompletions ? 1 : 0) + (hasAnchor ? 1 : 0) + (hasOnceDate ? 1 : 0)
+        + (hasStartDate ? 1 : 0);
 
       return data.keys().hasAll(['name', 'frequency', 'rotation', 'currentIndex'])
         && data.keys().size() == totalSize
@@ -90,6 +93,7 @@ service cloud.firestore {
         && (!hasCompletions || (data.completions is map && data.completions.size() <= 400))
         && (!hasAnchor || (data.anchorDate == null || (data.anchorDate is string && data.anchorDate.size() <= 40)))
         && (!hasOnceDate || (data.onceDate == null || (data.onceDate is string && data.onceDate.size() <= 40)))
+        && (!hasStartDate || (data.startDate == null || (data.startDate is string && data.startDate.size() <= 40)))
         && (data.frequency != 'once' || (hasOnceDate && data.onceDate is string));
     }
 
