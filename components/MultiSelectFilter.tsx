@@ -3,29 +3,39 @@
 import React, { useEffect, useRef, useState } from 'react';
 import { Check, ChevronDown } from 'lucide-react';
 
-export type TaskFilterOption = { id: string; label: string; hint?: string };
+export type FilterOption = {
+  id: string;
+  label: string;
+  hint?: string;
+  /** Rendered before the label, e.g. a resident's Avatar. */
+  icon?: React.ReactNode;
+};
 
-type TaskFilterSelectProps = {
-  options: TaskFilterOption[];
+type MultiSelectFilterProps = {
+  options: FilterOption[];
   /** Empty means every option is included. */
   selectedIds: string[];
   onChange: (ids: string[]) => void;
   allLabel: string;
+  /** Plural noun for the "N selected" summary, e.g. 'משימות'. */
+  countNoun?: string;
   className?: string;
 };
 
 /**
- * Multi-select dropdown shared by the day and week views, so the two cannot
- * end up filtered to different sets of tasks. A native <select multiple> is
- * unusable on a phone, so this is a button plus a checkbox panel.
+ * Multi-select dropdown used wherever two views must not end up filtered to
+ * different sets, and now for people as well as tasks. A native
+ * <select multiple> is unusable on a phone, so this is a button plus a
+ * checkbox panel.
  */
-export function TaskFilterSelect({
+export function MultiSelectFilter({
   options,
   selectedIds,
   onChange,
   allLabel,
+  countNoun = 'פריטים',
   className = ''
-}: TaskFilterSelectProps) {
+}: MultiSelectFilterProps) {
   const [open, setOpen] = useState(false);
   const rootRef = useRef<HTMLDivElement>(null);
 
@@ -47,15 +57,15 @@ export function TaskFilterSelect({
     };
   }, [open]);
 
-  // An id that no longer matches a task (a deleted chore) must not be counted,
-  // or the summary claims a selection the list cannot show.
+  // An id that no longer matches an option (a deleted chore or resident) must
+  // not be counted, or the summary claims a selection the list cannot show.
   const selected = options.filter(o => selectedIds.includes(o.id));
   const summary =
     selected.length === 0
       ? allLabel
       : selected.length === 1
         ? selected[0].label
-        : `${selected.length} משימות נבחרו`;
+        : `${selected.length} ${countNoun} נבחרו`;
 
   const toggle = (id: string) =>
     onChange(selectedIds.includes(id) ? selectedIds.filter(x => x !== id) : [...selectedIds, id]);
@@ -69,7 +79,10 @@ export function TaskFilterSelect({
         aria-expanded={open}
         className="w-full flex items-center justify-between gap-2 bg-white border border-[#E6E0D4] rounded-2xl px-4 py-3 text-sm font-medium text-[#6B5E4C] outline-none focus:border-[#A1C181] shadow-sm text-right"
       >
-        <span className="truncate">{summary}</span>
+        <span className="flex items-center gap-2 min-w-0">
+          {selected.length === 1 && selected[0].icon}
+          <span className="truncate">{summary}</span>
+        </span>
         <ChevronDown
           className={`w-4 h-4 flex-shrink-0 text-[#8C7E6A] transition-transform ${open ? 'rotate-180' : ''}`}
         />
@@ -106,11 +119,14 @@ export function TaskFilterSelect({
                 onClick={() => toggle(option.id)}
                 className={`w-full flex items-center justify-between gap-2 px-3 py-2.5 rounded-xl text-sm text-right transition-colors ${isSelected ? 'bg-[#F3EFE9] text-[#3D3732]' : 'text-[#6B5E4C] hover:bg-[#F5F1EA]'}`}
               >
-                <span className="min-w-0">
-                  <span className="block truncate font-medium">{option.label}</span>
-                  {option.hint && (
-                    <span className="block text-[10px] text-[#A39788]">{option.hint}</span>
-                  )}
+                <span className="flex items-center gap-2 min-w-0">
+                  {option.icon}
+                  <span className="min-w-0">
+                    <span className="block truncate font-medium">{option.label}</span>
+                    {option.hint && (
+                      <span className="block text-[10px] text-[#A39788]">{option.hint}</span>
+                    )}
+                  </span>
                 </span>
                 <span
                   aria-hidden

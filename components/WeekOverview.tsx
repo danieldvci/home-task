@@ -45,6 +45,12 @@ type WeekOverviewProps = {
   onSelectDay?: (date: Date) => void;
   onShiftWeek?: (days: number) => void;
   rangeLabel?: string;
+  /**
+   * Why `rows` is empty. The grid cannot tell on its own, and blaming the
+   * filter unconditionally told a household with no chores to change something
+   * it had never set.
+   */
+  emptyReason?: 'clear' | 'filtered';
 };
 
 function CellContent({ cell }: { cell: WeekCell }) {
@@ -61,13 +67,14 @@ function CellContent({ cell }: { cell: WeekCell }) {
         photoURL={cell.person.photoURL}
         size="sm"
         className={
-          cell.state === 'done'
-            ? 'opacity-45'
-            : cell.state === 'cancelled'
-              ? 'opacity-30 grayscale'
-              : cell.state === 'overdue'
-                ? 'ring-2 ring-rose-400'
-                : ''
+          // A done day is marked by its badge alone. Dimming it was tuned for
+          // flat initials; on a photograph it reads as broken rather than
+          // finished, and it collided with the greyed-out cancelled state.
+          cell.state === 'cancelled'
+            ? 'opacity-30 grayscale'
+            : cell.state === 'overdue'
+              ? 'ring-2 ring-rose-400'
+              : ''
         }
       />
       {cell.state === 'done' && (
@@ -94,7 +101,8 @@ export function WeekOverview({
   legend,
   onSelectDay,
   onShiftWeek,
-  rangeLabel
+  rangeLabel,
+  emptyReason = 'filtered'
 }: WeekOverviewProps) {
   const nav = onShiftWeek && (
     <div className="flex items-center justify-between gap-2 bg-white border border-[#E6E0D4] rounded-2xl px-2 py-1.5 shadow-sm">
@@ -126,10 +134,18 @@ export function WeekOverview({
         {nav}
         <div className="flex flex-col items-center justify-center py-16 text-center">
           <div className="w-20 h-20 bg-[#F5F1EA] rounded-full flex items-center justify-center mb-4">
-            <span className="text-2xl">🗓️</span>
+            {emptyReason === 'filtered' ? (
+              <span className="text-2xl">🗓️</span>
+            ) : (
+              <Check className="w-10 h-10 text-[#A1C181]" />
+            )}
           </div>
-          <h3 className="text-xl font-bold text-[#3D3732] mb-1">אין תורנויות להצגה</h3>
-          <p className="text-[#8C7E6A]">נסה לשנות את הסינון.</p>
+          <h3 className="text-xl font-bold text-[#3D3732] mb-1">
+            {emptyReason === 'filtered' ? 'אין משימות שמתאימות לסינון' : 'אין תורנויות לשבוע זה'}
+          </h3>
+          <p className="text-[#8C7E6A]">
+            {emptyReason === 'filtered' ? 'נסה לשנות את הסינון.' : 'הכל נקי ומסודר.'}
+          </p>
         </div>
       </div>
     );

@@ -1,7 +1,9 @@
 import assert from 'node:assert/strict';
 import {
+  MISSED_LOOKBACK_DAYS,
   buildScheduleCell,
   buildScheduleRows,
+  dayStripDays,
   missedOccurrences,
   weekAround,
   shiftDays
@@ -358,6 +360,66 @@ const ALL: ScheduleFilters = { choreIds: [], category: 'all', personId: 'all' };
   // A day the whole household was away is nobody's debt to carry.
   const away = trio.map(u => ({ ...u, isAbsent: true }));
   assert.deepEqual(missedOccurrences(makeChore(), away, TUE, TUE, 3), [], 'unavailable is not owed');
+}
+
+// --- The day selector reaching the day being shown --------------------------
+
+{
+  // Ordinary use is unchanged: while the selection is near today the strip
+  // stays put, so it does not shuffle under the user on every tap.
+  assert.deepEqual(
+    dayStripDays(TUE, TUE).map(dayKey),
+    Array.from({ length: 11 }, (_, i) => dayKey(shiftDays(TUE, i - 3))),
+    'selecting today leaves the window anchored at today-3..today+7'
+  );
+  assert.deepEqual(
+    dayStripDays(TUE, shiftDays(TUE, 7)).map(dayKey),
+    dayStripDays(TUE, TUE).map(dayKey),
+    'and the last day inside the window does not move it'
+  );
+}
+
+{
+  // The invariant that was broken. The strip is the only place the day view
+  // names its date, so a selection missing from it left the user reading tasks
+  // for an unlabelled day, where marking one done backdates the completion.
+  // Aug 22 2026 is a Saturday, when the current week's Sunday is six days back
+  // and so outside a window fixed to today-3. Tapping that column in the week
+  // grid needs no navigation at all to reproduce the bug.
+  const SAT = new Date(2026, 7, 22, 12, 0, 0);
+  const jumps: [string, Date, Date][] = [
+    ['the week arrows, one week back', TUE, shiftDays(TUE, -7)],
+    ['the week arrows, several weeks on', TUE, shiftDays(TUE, 21)],
+    ['the carry-over badge at its furthest reach', TUE, shiftDays(TUE, -MISSED_LOOKBACK_DAYS)],
+    ["this week's Sunday, tapped on a Saturday", SAT, shiftDays(SAT, -SAT.getDay())]
+  ];
+  for (const [via, today, selected] of jumps) {
+    assert.ok(
+      dayStripDays(today, selected).some(d => dayKey(d) === dayKey(selected)),
+      `the selected day is still on the strip after ${via}`
+    );
+  }
+}
+
+{
+  // A jump lands centred rather than pinned to an edge, so the days either side
+  // of the target can be reached without another jump.
+  const target = shiftDays(TUE, -14);
+  const strip = dayStripDays(TUE, target).map(dayKey);
+  assert.equal(strip.indexOf(dayKey(target)), 5, 'an out-of-range selection sits mid-strip');
+}
+
+{
+  const strip = dayStripDays(TUE, shiftDays(TUE, -30));
+  assert.equal(strip.length, 11, 'the strip is always the same width');
+  assert.equal(new Set(strip.map(dayKey)).size, 11, 'with no repeated day');
+  for (let i = 1; i < strip.length; i++) {
+    assert.equal(
+      dayKey(strip[i]),
+      dayKey(shiftDays(strip[i - 1], 1)),
+      'and runs forwards one day at a time'
+    );
+  }
 }
 
 console.log('schedule-view tests passed');

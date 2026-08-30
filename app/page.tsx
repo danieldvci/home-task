@@ -28,7 +28,8 @@ import {
   Loader2,
   RotateCcw,
   StickyNote,
-  Home
+  Home,
+  BarChart3
 } from 'lucide-react';
 import type { LucideIcon } from 'lucide-react';
 import { motion, AnimatePresence } from 'motion/react';
@@ -56,10 +57,20 @@ import {
 import { CollapsibleSection } from '../components/CollapsibleSection';
 import { WeekOverview } from '../components/WeekOverview';
 import type { WeekPerson, WeekRow } from '../components/WeekOverview';
-import { TaskFilterSelect } from '../components/TaskFilterSelect';
+import { MultiSelectFilter } from '../components/MultiSelectFilter';
+import { ActivityChart } from '../components/ActivityChart';
 import {
+  ACTIVITY_WINDOWS,
+  DEFAULT_ACTIVITY_WINDOW,
+  activityByDay,
+  activityTotals,
+  busiestDay
+} from '../lib/activity-stats';
+import {
+  ALL_TASKS,
   DEFAULT_CATEGORY,
   buildScheduleRows,
+  dayStripDays,
   missedOccurrences,
   shiftDays,
   weekAround
@@ -75,6 +86,7 @@ import {
   choreOccursOnDate,
   completionMarkers,
   currentIndexAfterUndo,
+  dayKey,
   getChoreHealth,
   getNextActiveIndex,
   isUserAbsentNow,
@@ -151,6 +163,14 @@ const MANUAL_LOG_ACTION = 'רישום ידני';
 /** Ceiling on one delete-older run, so a mis-tap cannot clear years at once. */
 const DELETE_OLDER_MAX = 200;
 
+/**
+ * How many recent log records the app keeps loaded. Deliberately a constant
+ * rather than something derived from the history filter: the same array backs
+ * the leaderboard, the reaction bars on task cards and the delete flow, so
+ * tying it to that filter would leak it into the other tabs.
+ */
+const LOG_FEED_LIMIT = 200;
+
 const photoLabel = (count: number) => (count > 1 ? `צורפו ${count} תמונות` : 'צורפה תמונה');
 
 /** All photos on a log, tolerating records that only carry the legacy field. */
@@ -220,6 +240,12 @@ export default function ChoresApp() {
   const profileScope = user && householdId ? `${user.uid}:${householdId}` : '';
   const [pickedProfile, setPickedProfile] = useState<{ scope: string; id: string } | null>(null);
   const [activeTab, setActiveTab] = useState<'tasks' | 'history' | 'settings'>('tasks');
+  const [activityWindow, setActivityWindow] = useState<number>(DEFAULT_ACTIVITY_WINDOW);
+  // Empty means everyone / everything, matching choreFilterIds. Kept separate
+  // from the tasks tab's filters: narrowing the history should not silently
+  // change what the tasks tab shows on the way back.
+  const [historyPersonIds, setHistoryPersonIds] = useState<string[]>([]);
+  const [historyChoreIds, setHistoryChoreIds] = useState<string[]>([]);
   const [selectedUserId, setSelectedUserId] = useState<string | 'all'>('my_tasks');
   const [selectedCategoryFilter, setSelectedCategoryFilter] = useState<string | 'all'>('all');
   const [tasksView, setTasksView] = useState<'day' | 'week'>('day');
@@ -308,7 +334,11 @@ export default function ChoresApp() {
       console.error(`[listener:chores] households/${householdId}/chores failed:`, error.code, error.message);
     });
 
-    const qLogs = query(collection(db, 'households', householdId, 'logs'), orderBy('timestamp', 'desc'), limit(50));
+    const qLogs = query(
+      collection(db, 'households', householdId, 'logs'),
+      orderBy('timestamp', 'desc'),
+      limit(LOG_FEED_LIMIT)
+    );
     const unsubLogs = onSnapshot(qLogs, (snap) => {
       setLogsSnap({
         householdId,
@@ -375,9 +405,9 @@ export default function ChoresApp() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [remindersOn, currentUserId, chores, users, todayStr]);
 
-  // The delete-older confirmation used to count the 50 loaded logs, which said
-  // "3" while the query behind the button would have deleted hundreds. Ask the
-  // server for the real total instead.
+  // The delete-older confirmation used to count only the loaded logs, which
+  // said "3" while the query behind the button would have deleted hundreds.
+  // Ask the server for the real total instead.
   const pendingDeleteTimestamp = logs.find(l => l.id === pendingDeleteLogId)?.timestamp ?? null;
   useEffect(() => {
     if (!householdId || !pendingDeleteTimestamp) {
@@ -501,12 +531,10 @@ export default function ChoresApp() {
     );
   }
 
-  // Generate an array of dates for the day selector (Today -3 to +7)
-  const daysArray = Array.from({length: 11}).map((_, i) => {
-    const d = new Date(today);
-    d.setDate(today.getDate() - 3 + i);
-    return d;
-  });
+  // The days the selector offers. Anchored on today, but it follows the
+  // selection out of that range rather than leaving the day view showing a date
+  // no button matches.
+  const daysArray = dayStripDays(today, selectedDate);
 
   // The week containing the selected day, so the two views always describe the
   // same stretch of time. Pinning this to `today` meant picking a date in the
@@ -587,7 +615,7 @@ export default function ChoresApp() {
   };
 
   // Deletes the chosen entry and the entries just before it, including ones
-  // outside the 50-item history window currently loaded. Capped per run so a
+  // outside the history window currently loaded. Capped per run so a
   // mis-tap cannot wipe years of history; the modal shows the real total and
   // how much of it this run will take.
   const handleDeleteLogAndOlder = async (log: LogType) => {
@@ -1504,16 +1532,30 @@ export default function ChoresApp() {
         return pendingSwapChore.rotation
           .filter(uid => uid !== activeUserId)
           .map(uid => users.find(u => u.id === uid))
-          .filter((u): u is UserType => !!u && !isUserAbsentOnDay(u, selectedDate));
+          .filter((u): u is UserType => !!u && !isUserAbsentOnDay(u, selectedDate))
+          .map(u => ({ ...u, photoURL: resolvePhoto(u) }));
       })()
     : [];
 
   // Simple gamification: tally completions from the visible activity log
-  // (last 50 entries) per resident, used for a lightweight leaderboard.
+  // per resident, used for a lightweight leaderboard.
   const leaderboard = users
     .map(u => ({ user: u, count: logs.filter(l => l.userId === u.id && l.action === 'ביצוע משימה').length }))
     .filter(entry => entry.count > 0)
     .sort((a, b) => b.count - a.count);
+
+  // Option lists for the multi-select filters, shared by the tasks and history
+  // tabs so the two offer the same names for the same things.
+  const taskFilterOptions = chores.map(c => ({
+    id: c.id,
+    label: c.name,
+    hint: frequencyLabel(c.frequency, c.customDays)
+  }));
+  const personFilterOptions = users.map(u => ({
+    id: u.id,
+    label: u.id === currentUserId ? `${u.name} (אני)` : u.name,
+    icon: <Avatar name={u.name} color={u.color} photoURL={resolvePhoto(u)} size="sm" />
+  }));
 
   if (pickingProfile) {
     return (
@@ -1545,7 +1587,7 @@ export default function ChoresApp() {
               onClick={() => selectActingProfile(u.id)}
               className="flex flex-col items-center justify-center p-6 bg-white rounded-3xl shadow-sm border border-[#E6E0D4] gap-4 hover:border-[#A1C181]"
             >
-              <Avatar name={u.name} color={u.color} photoURL={u.photoURL} size="lg" />
+              <Avatar name={u.name} color={u.color} photoURL={resolvePhoto(u)} size="lg" />
               <span className="text-lg font-medium text-[#4A443F]">{u.name}</span>
             </motion.button>
           ))}
@@ -1606,13 +1648,21 @@ export default function ChoresApp() {
     );
     const weekLegend = users.filter(u => weekLegendIds.has(u.id)).map(toWeekPerson);
 
+    // An empty view means one of two opposite things, and each view used to
+    // assume a different one: the day list called the house clean when the
+    // default "my tasks" filter was simply hiding everyone else's turn, and the
+    // week grid told a household with no chores to change a filter it had never
+    // set. Rebuilding unfiltered says which it is. `||` short-circuits, so the
+    // second pass only runs when there is nothing on screen to explain.
+    const dayHasAnySchedule =
+      dayEntries.length > 0 ||
+      buildScheduleRows(chores, users, [selectedDate], ALL_TASKS, today).length > 0;
+    const weekHasAnySchedule =
+      weekRows.length > 0 ||
+      buildScheduleRows(chores, users, weekDays, ALL_TASKS, today).length > 0;
+
     const weekRangeLabel = `${weekDays[0].toLocaleDateString('he-IL', { day: '2-digit', month: '2-digit' })} – ${weekDays[6].toLocaleDateString('he-IL', { day: '2-digit', month: '2-digit' })}`;
 
-    const taskFilterOptions = chores.map(c => ({
-      id: c.id,
-      label: c.name,
-      hint: frequencyLabel(c.frequency, c.customDays)
-    }));
 
     return (
       <div className="flex flex-col gap-4 pb-24">
@@ -1643,11 +1693,12 @@ export default function ChoresApp() {
         </div>
 
         {/* Task filter, shared by both views */}
-        <TaskFilterSelect
+        <MultiSelectFilter
           options={taskFilterOptions}
           selectedIds={choreFilterIds}
           onChange={setChoreFilterIds}
           allLabel="כל המשימות בבית"
+          countNoun="משימות"
           className="mb-2"
         />
 
@@ -1692,6 +1743,7 @@ export default function ChoresApp() {
             rows={weekRows}
             legend={weekLegend}
             rangeLabel={weekRangeLabel}
+            emptyReason={weekHasAnySchedule ? 'filtered' : 'clear'}
             onShiftWeek={(days) => setSelectedDate(shiftDays(selectedDate, days))}
             onSelectDay={(date) => {
               setSelectedDate(date);
@@ -1727,10 +1779,18 @@ export default function ChoresApp() {
               className="flex flex-col items-center justify-center py-16 text-center"
             >
               <div className="w-20 h-20 bg-[#F5F1EA] rounded-full flex items-center justify-center mb-4">
-                <Check className="w-10 h-10 text-[#A1C181]" />
+                {dayHasAnySchedule ? (
+                  <span className="text-2xl">🗓️</span>
+                ) : (
+                  <Check className="w-10 h-10 text-[#A1C181]" />
+                )}
               </div>
-              <h3 className="text-xl font-bold text-[#3D3732] mb-1">אין משימות ליום זה!</h3>
-              <p className="text-[#8C7E6A]">הכל נקי ומסודר.</p>
+              <h3 className="text-xl font-bold text-[#3D3732] mb-1">
+                {dayHasAnySchedule ? 'אין משימות שמתאימות לסינון' : 'אין משימות ליום זה!'}
+              </h3>
+              <p className="text-[#8C7E6A]">
+                {dayHasAnySchedule ? 'נסה לשנות את הסינון.' : 'הכל נקי ומסודר.'}
+              </p>
             </motion.div>
           ) : (
             dayEntries.map(({ chore, cell, assignment }) => {
@@ -1753,7 +1813,7 @@ export default function ChoresApp() {
               // Undo returns the turn to the recorded completer, so gate the
               // button on the same person handleUndoDone will restore.
               const canUndo = isAdmin || assignment.completedBy === currentUserId;
-              // Only the 50 most recent logs are loaded, so an old completion
+              // Only the most recent logs are loaded, so an old completion
               // simply renders without a reaction bar.
               const completionLog = assignment.logId
                 ? logs.find(l => l.id === assignment.logId)
@@ -1768,7 +1828,10 @@ export default function ChoresApp() {
                   className={`p-5 rounded-3xl border transition-all ${done ? 'bg-[#F5F1EA] border-[#A1C181]/50' : 'bg-white border-[#E6E0D4] shadow-sm'}`}
                 >
                   <div className="flex justify-between items-start mb-4">
-                    <div>
+                    {/* Yields width to the assignee chip: the badges below are
+                        wide enough to starve it otherwise, and a wrapped task
+                        title beats a cropped face. */}
+                    <div className="min-w-0 flex-1">
                       <div className="flex items-center gap-2 flex-wrap">
                         <h3 className={`text-lg font-bold ${done ? 'text-[#6B5E4C] line-through opacity-70' : 'text-[#3D3732]'}`}>
                           {chore.name}
@@ -1836,13 +1899,13 @@ export default function ChoresApp() {
                     </div>
                     {unavailable ? (
                       <div className="flex items-center gap-2 px-3 py-1.5 rounded-full bg-[#F1ECE3] text-[#8C7E6A]">
-                        <UserX className="w-4 h-4" />
+                        <UserX className="w-4 h-4 flex-shrink-0" />
                         <span className="text-sm font-bold">אין דייר זמין</span>
                       </div>
                     ) : assignee && (
                       <div className={`flex flex-col items-end gap-1`}>
                         {chore.rotation && chore.rotation.length > 1 ? (
-                          <div className={`flex items-center gap-1.5 px-3 py-1.5 rounded-3xl ${done ? 'opacity-50' : 'bg-[#F3EFE9]'}`}>
+                          <div className={`flex items-center gap-1.5 px-3 py-1.5 rounded-3xl ${done ? '' : 'bg-[#F3EFE9]'}`}>
                             <span className="text-[10px] font-bold text-[#8C7E6A] ml-1">תור:</span>
                             <div className="flex items-center" dir="ltr">
                               {(() => {
@@ -1856,15 +1919,19 @@ export default function ChoresApp() {
                                 return orderedRotation.map((uId, i) => {
                                   const u = users.find(x => x.id === uId);
                                   if (!u) return null;
+                                  // Whoever holds the turn is shown larger than
+                                  // the residents queued behind them.
+                                  const isCurrent = i === 0;
                                   return (
-                                    <div key={i} className="flex items-center">
-                                      <div 
-                                        className={`w-6 h-6 rounded-full flex items-center justify-center text-white text-xs border-2 border-[#F3EFE9] ${u.color} ${i === 0 ? 'z-10 relative shadow-sm ring-1 ring-[#A1C181]/50' : 'opacity-60 -ml-2 relative scale-90 z-0'}`} 
-                                        title={u.name}
-                                      >
-                                        {u.name.charAt(0)}
-                                      </div>
-                                    </div>
+                                    <Avatar
+                                      key={i}
+                                      name={u.name}
+                                      color={u.color}
+                                      photoURL={resolvePhoto(u)}
+                                      size={isCurrent ? 'md' : 'sm'}
+                                      title={u.name}
+                                      className={`border-2 border-[#F3EFE9] ${isCurrent ? 'z-10 relative ring-1 ring-[#A1C181]/50' : 'opacity-60 -ml-2 relative scale-90 z-0'}`}
+                                    />
                                   );
                                 });
                               })()}
@@ -1874,11 +1941,17 @@ export default function ChoresApp() {
                             </span>
                           </div>
                         ) : (
-                          <div className={`flex items-center gap-2 px-3 py-1.5 rounded-full ${done ? 'opacity-50' : 'bg-[#F3EFE9]'}`}>
-                            <div className={`w-6 h-6 rounded-full flex items-center justify-center text-white text-xs ${assignee.color}`}>
-                              {assignee.name.charAt(0)}
-                            </div>
-                            <span className="text-base font-extrabold text-[#3D3732]">{assignee.id === currentUserId ? 'התור שלך' : assignee.name}</span>
+                          <div className={`flex items-center gap-2 px-3 py-1.5 rounded-full ${done ? '' : 'bg-[#F3EFE9]'}`}>
+                            <Avatar
+                              name={assignee.name}
+                              color={assignee.color}
+                              photoURL={resolvePhoto(assignee)}
+                              size="md"
+                              title={assignee.name}
+                            />
+                            <span className="text-base font-extrabold text-[#3D3732]">
+                              {assignee.id === currentUserId ? 'התור שלך' : assignee.name}
+                            </span>
                           </div>
                         )}
                       </div>
@@ -2021,6 +2094,33 @@ export default function ChoresApp() {
 
   const renderHistory = () => {
     const today = normalizeDay(new Date()).getTime();
+
+    // Counted from the completions map rather than the log, so the chart reads
+    // the same state the day and week views draw from. todayStr is re-derived
+    // on the clock tick, so the window rolls over at midnight without a reload.
+    const shownChores = historyChoreIds.length
+      ? chores.filter(c => historyChoreIds.includes(c.id))
+      : chores;
+    const shownUserIds = historyPersonIds.length ? historyPersonIds : users.map(u => u.id);
+    const activityDays = activityByDay(shownChores, shownUserIds, activityWindow, new Date(todayStr));
+    const activityLegend = activityTotals(activityDays, shownUserIds);
+    const activityPeak = busiestDay(activityDays);
+
+    // The log carries no chore link, so only the person and the day range can
+    // narrow it; the task filter above belongs to the chart alone.
+    const windowStart = shiftDays(new Date(todayStr), -(activityWindow - 1));
+    const visibleLogs = logs.filter(
+      log =>
+        (historyPersonIds.length === 0 || historyPersonIds.includes(log.userId)) &&
+        normalizeDay(new Date(log.timestamp)).getTime() >= windowStart.getTime()
+    );
+    // logs arrive newest-first, so the last one loaded is the oldest we hold.
+    const oldestLoaded = logs[logs.length - 1]?.timestamp;
+    const feedTruncated =
+      logs.length >= LOG_FEED_LIMIT &&
+      !!oldestLoaded &&
+      normalizeDay(new Date(oldestLoaded)).getTime() > windowStart.getTime();
+
     const dayHeading = (iso: string) => {
       const diffDays = Math.round((today - normalizeDay(new Date(iso)).getTime()) / 86400000);
       if (diffDays === 0) return 'היום';
@@ -2030,7 +2130,7 @@ export default function ChoresApp() {
 
     // logs arrive newest-first, so a linear pass keeps each day contiguous.
     const groups: { key: string; label: string; items: LogType[] }[] = [];
-    logs.forEach(log => {
+    visibleLogs.forEach(log => {
       const key = normalizeDay(new Date(log.timestamp)).toDateString();
       const current = groups[groups.length - 1];
       if (current && current.key === key) current.items.push(log);
@@ -2039,6 +2139,64 @@ export default function ChoresApp() {
 
     return (
       <div className="flex flex-col gap-4 pb-24">
+        {/* Both the chart and the log below follow these two */}
+        <MultiSelectFilter
+          options={personFilterOptions}
+          selectedIds={historyPersonIds}
+          onChange={setHistoryPersonIds}
+          allLabel="כל הדיירים"
+          countNoun="דיירים"
+        />
+
+        <div className="flex bg-[#F1ECE3] border border-[#E6E0D4] rounded-2xl p-1">
+          {ACTIVITY_WINDOWS.map(days => (
+            <button
+              key={days}
+              type="button"
+              onClick={() => setActivityWindow(days)}
+              aria-pressed={activityWindow === days}
+              className={`flex-1 py-2 rounded-xl text-sm font-bold tabular-nums transition-all ${
+                activityWindow === days
+                  ? 'bg-white text-[#3D3732] shadow-sm'
+                  : 'text-[#8C7E6A] hover:text-[#4A443F]'
+              }`}
+            >
+              {days} ימים
+            </button>
+          ))}
+        </div>
+
+        <div className="bg-white p-6 rounded-3xl border border-[#E6E0D4] shadow-sm">
+          <h2 className="text-xl font-extrabold text-[#3D3732] flex items-center gap-2 mb-1">
+            <BarChart3 className="w-6 h-6 text-[#A1C181]" />
+            מי עשה מה
+          </h2>
+          <p className="text-xs text-[#A39788] mb-3">
+            משימות שבוצעו ב־{activityWindow} הימים האחרונים
+          </p>
+          {/* Scoped to the chart on purpose: a log record carries no chore id */}
+          <MultiSelectFilter
+            options={taskFilterOptions}
+            selectedIds={historyChoreIds}
+            onChange={setHistoryChoreIds}
+            allLabel="כל המשימות בבית"
+            countNoun="משימות"
+            className="mb-4"
+          />
+          <ActivityChart
+            days={activityDays}
+            totals={activityLegend}
+            people={users.map(u => ({
+              id: u.id,
+              name: u.name,
+              color: u.color,
+              photoURL: resolvePhoto(u)
+            }))}
+            max={activityPeak}
+            todayKey={dayKey(new Date(todayStr))}
+          />
+        </div>
+
         <div className="bg-white p-6 rounded-3xl border border-[#E6E0D4] shadow-sm">
           <div className="flex items-center justify-between gap-2 mb-4">
             <h2 className="text-xl font-extrabold text-[#3D3732] flex items-center gap-2">
@@ -2057,6 +2215,10 @@ export default function ChoresApp() {
 
           {logs.length === 0 ? (
             <p className="text-center text-[#8C7E6A] py-8">אין פעילויות עדיין.</p>
+          ) : visibleLogs.length === 0 ? (
+            // Say the filter is hiding things, or an active filter looks like
+            // the records were lost.
+            <p className="text-center text-[#8C7E6A] py-8">אין פעילות שתואמת את הסינון.</p>
           ) : (
             <div className="flex flex-col gap-5">
               {groups.map(group => (
@@ -2139,6 +2301,15 @@ export default function ChoresApp() {
                 </div>
               ))}
             </div>
+          )}
+
+          {feedTruncated && (
+            // The feed is a fixed number of recent records, so a wide range can
+            // reach further back than what was loaded. Say so rather than let
+            // the gap read as a quiet stretch.
+            <p className="mt-5 text-[11px] text-[#A39788] text-center">
+              מוצגות {LOG_FEED_LIMIT} הרשומות האחרונות בלבד; ייתכן שיש פעילות ישנה יותר בטווח הזה.
+            </p>
           )}
         </div>
       </div>
@@ -2252,9 +2423,13 @@ export default function ChoresApp() {
               return (
                 <div key={uId} className="flex items-center justify-between bg-white p-2 rounded-xl border border-[#E6E0D4] shadow-sm">
                   <div className="flex items-center gap-2">
-                    <div className={`w-8 h-8 rounded-full flex items-center justify-center text-white font-bold ${u.color}`}>
-                      {u.name.charAt(0)}
-                    </div>
+                    <Avatar
+                      name={u.name}
+                      color={u.color}
+                      photoURL={resolvePhoto(u)}
+                      size="sm"
+                      className="!w-8 !h-8 !text-sm"
+                    />
                     <span className="font-medium text-[#3D3732]">{u.name}</span>
                   </div>
                   <div className="flex gap-1" dir="ltr">
@@ -2777,7 +2952,7 @@ export default function ChoresApp() {
         {/* Leaderboard */}
         {leaderboard.length > 0 && (
           <CollapsibleSection title="מובילי הביצועים" Icon={Trophy}>
-            <p className="text-xs text-[#8C7E6A] -mt-1">לפי הפעילות האחרונה (עד 50 רשומות)</p>
+            <p className="text-xs text-[#8C7E6A] -mt-1">לפי הפעילות האחרונה (עד {LOG_FEED_LIMIT} רשומות)</p>
             <div className="bg-white border border-[#E6E0D4] rounded-3xl shadow-sm divide-y divide-[#E6E0D4] overflow-hidden">
               {leaderboard.map(({ user: u, count }, idx) => (
                 <div key={u.id} className="flex items-center justify-between p-4">
@@ -2947,7 +3122,8 @@ export default function ChoresApp() {
           }
           candidates={quickTaskSource.rotation
             .map(uid => users.find(u => u.id === uid))
-            .filter((u): u is UserType => !!u)}
+            .filter((u): u is UserType => !!u)
+            .map(u => ({ ...u, photoURL: resolvePhoto(u) }))}
           defaultAssigneeId={quickTaskDefaultAssignee}
           busy={actionBusy}
           onConfirm={createOnceTask}

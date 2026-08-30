@@ -1,0 +1,51 @@
+---
+description: Local dev server, build, lint baseline and Windows shell gotchas
+alwaysApply: true
+---
+
+# Never run `npm run build` while `npm run dev` is running
+
+Both write to `.next/`. A production build replaces `.next/static` with hashed
+production chunks, so the running dev server 404s on its own assets:
+
+```
+GET /_next/static/chunks/main-app.js            404
+GET /_next/static/chunks/app-pages-internals.js 404
+GET /_next/static/css/app/layout.css            404
+```
+
+Stop the dev server first, or accept that you must clean up afterwards.
+
+# Check for an orphan dev server before starting one
+
+They survive for days and silently push the new server onto port 3001+, and two
+`next dev` processes sharing `.next/cache/webpack` corrupt it. Symptoms are
+`ENOENT: rename '0.pack.gz_' -> '0.pack.gz'` and
+`SyntaxError: Unexpected non-whitespace character after JSON at position 4`.
+
+```powershell
+Get-NetTCPConnection -LocalPort 3000 -State Listen -ErrorAction SilentlyContinue |
+  ForEach-Object { Get-CimInstance Win32_Process -Filter "ProcessId=$($_.OwningProcess)" |
+    Select-Object ProcessId, CommandLine }
+```
+
+Recovery: stop every `next dev` for this repo, `Remove-Item -Recurse -Force .next`,
+then `npm run dev`.
+
+# Lint has a known baseline
+
+`npm run lint` runs `eslint .`, which walks the committed `.netlify` build output
+and reports unresolvable-rule errors there. Lint source only:
+
+```powershell
+npx eslint app components lib scripts
+```
+
+That still reports 3 pre-existing errors — `app/page.tsx` (`set-state-in-effect`)
+and two in `components/TaskModals.tsx` (`refs` during render). Leave them alone
+unless asked; just do not add new ones.
+
+# PowerShell, not bash
+
+- No heredocs. For a multi-line commit message, write a file and `git commit -F`.
+- `$PID` is read-only; name loop variables something else (`$procId`).

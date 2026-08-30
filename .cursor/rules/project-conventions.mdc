@@ -1,0 +1,51 @@
+---
+description: Where state of truth lives, and the shared modules views must render through
+alwaysApply: true
+---
+
+# There is no server
+
+Everything runs in the browser against Firestore. Prefer deriving state on read
+over persisting it: a stored "missed" or "overdue" record would have to be
+written by whichever tab happened to be open at midnight, so several open tabs
+race and a household that never opens the app leaves holes. See the comment on
+`missedOccurrences` in `lib/schedule-view.ts`.
+
+# One source of truth per concern
+
+| Concern | Render through | Never |
+|---|---|---|
+| Day list and week grid | `buildScheduleRows` in `lib/schedule-view.ts` | Assemble a view from `Chore` directly — the two views drifted apart this way |
+| Who did what | `chore.completions` | The activity log |
+| A person's icon | `components/Avatar.tsx` | A hand-rolled circle with `name.charAt(0)` |
+
+Resolve a photo with `resolvePhoto` in `app/page.tsx`, which falls back to the
+Google account picture when the Firestore document has none, and hand the result
+to `Avatar` (or down to a child component) as `photoURL`.
+
+`chore.completions` is keyed `YYYY-MM-DD` and holds `{ userId, at, skipped?,
+cancelled? }`. A `skipped` day handed the turn on and is still owed; a
+`cancelled` day was written off. Neither is work anybody did.
+
+The activity log is the wrong source for statistics: it is capped at
+`limit(50)` with no date filter, and it is append-only, so undoing a completion
+writes a second record rather than removing the first.
+
+# Adding a field to a chore
+
+`firestore.rules` validates chore documents by exact key count. A new field
+needs three edits or writes silently start failing:
+
+1. the `hasX` line and the `totalSize` sum in `isValidChoreStrict`
+2. a type/size check for the field
+3. a case in `scripts/rules.test.ts`
+
+Fields written before a change must keep working — treat a missing field as the
+old behaviour, the way a missing `startDate` means the schedule has no lower
+bound.
+
+# Tests
+
+Pure logic goes in `lib/`, its test in `scripts/<name>.test.ts` using
+`node:assert/strict`, registered in the `test:unit` script in `package.json`.
+Assert behaviour a user would notice, and say why in the message.

@@ -150,7 +150,6 @@ export function ReactionBar({
                     color={author?.color || 'bg-[#D4CBBF]'}
                     photoURL={photoOf?.(comment.userId)}
                     size="sm"
-                    className="flex-shrink-0"
                   />
                   <div className="flex-1 min-w-0">
                     <div className="flex items-baseline gap-2">

@@ -12,7 +12,7 @@
     "emulators": "firebase emulators:start --only auth,firestore,storage",
     "seed": "tsx scripts/seed-emulator.ts",
     "test": "npm run test:unit && npm run test:rules",
-    "test:unit": "tsx scripts/rotation.test.ts && tsx scripts/schedule-view.test.ts && tsx scripts/household-utils.test.ts",
+    "test:unit": "tsx scripts/rotation.test.ts && tsx scripts/schedule-view.test.ts && tsx scripts/activity-stats.test.ts && tsx scripts/household-utils.test.ts",
     "test:rules": "firebase emulators:exec --only firestore,storage --project demo-home-task \"tsx scripts/rules.test.ts\""
   },
   "dependencies": {

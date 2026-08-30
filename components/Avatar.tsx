@@ -8,6 +8,8 @@ type AvatarProps = {
   photoURL?: string | null;
   size?: 'sm' | 'md' | 'lg';
   className?: string;
+  /** Names an avatar that stands alone, such as one overlapped in a queue. */
+  title?: string;
 };
 
 const sizeClass = {
@@ -16,9 +18,12 @@ const sizeClass = {
   lg: 'w-16 h-16 text-2xl'
 };
 
-export function Avatar({ name, color, photoURL, size = 'md', className = '' }: AvatarProps) {
+export function Avatar({ name, color, photoURL, size = 'md', className = '', title }: AvatarProps) {
   const [failedUrl, setFailedUrl] = useState<string | null>(null);
-  const base = `${sizeClass[size]} rounded-full flex items-center justify-center text-white font-bold shadow-sm overflow-hidden ${className}`;
+  // flex-shrink-0 is not cosmetic: a flex item shrinks below its width by
+  // default, and object-cover then crops the photo to fill the narrowed box
+  // rather than scaling it, leaving a sliver of someone's face.
+  const base = `${sizeClass[size]} flex-shrink-0 rounded-full flex items-center justify-center text-white font-bold shadow-sm overflow-hidden ${className}`;
   const showImg = !!photoURL && failedUrl !== photoURL;
 
   if (showImg) {
@@ -27,6 +32,7 @@ export function Avatar({ name, color, photoURL, size = 'md', className = '' }: A
       <img
         src={photoURL!}
         alt={name}
+        title={title}
         // Google avatar URLs reject requests that send a referrer.
         referrerPolicy="no-referrer"
         className={`${base} object-cover bg-[#D4CBBF]`}
@@ -34,5 +40,5 @@ export function Avatar({ name, color, photoURL, size = 'md', className = '' }: A
       />
     );
   }
-  return <div className={`${base} ${color}`}>{name?.charAt(0) || '?'}</div>;
+  return <div className={`${base} ${color}`} title={title}>{name?.charAt(0) || '?'}</div>;
 }

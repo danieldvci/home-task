@@ -171,3 +171,28 @@ export const shiftDays = (date: Date, days: number) => {
   d.setDate(d.getDate() + days);
   return d;
 };
+
+export const DAY_STRIP_BEFORE = 3;
+export const DAY_STRIP_AFTER = 7;
+const DAY_STRIP_LENGTH = DAY_STRIP_BEFORE + DAY_STRIP_AFTER + 1;
+
+/**
+ * The day view's counterpart to `weekAround`: the days its selector offers.
+ *
+ * Anchored on today, but it must always contain `selected`. The strip is the
+ * only place the day view names the date it is showing, so a selection outside
+ * it left the user reading a list of tasks for an unlabelled day, and marking
+ * one done there backdates the completion. The week arrows and the carry-over
+ * badge, which reaches `MISSED_LOOKBACK_DAYS` back, both push the selection
+ * well past a window fixed to today.
+ */
+export const dayStripDays = (today: Date, selected: Date): Date[] => {
+  const anchored = shiftDays(today, -DAY_STRIP_BEFORE);
+  const sel = normalizeDay(selected).getTime();
+  const inRange =
+    sel >= anchored.getTime() && sel <= shiftDays(today, DAY_STRIP_AFTER).getTime();
+  // Centred rather than nudged just far enough, so a jump lands with the days
+  // either side of the target reachable instead of pinned to an edge.
+  const start = inRange ? anchored : shiftDays(selected, -Math.floor(DAY_STRIP_LENGTH / 2));
+  return Array.from({ length: DAY_STRIP_LENGTH }, (_, i) => shiftDays(start, i));
+};
