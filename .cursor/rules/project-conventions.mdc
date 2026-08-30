@@ -3,6 +3,9 @@ description: Where state of truth lives, and the shared modules views must rende
 alwaysApply: true
 ---
 
+`HOW-IT-WORKS.md` in the repo root explains the domain model and the rules the
+app turns on. Read it when you need the reasoning behind something here.
+
 # There is no server
 
 Everything runs in the browser against Firestore. Prefer deriving state on read
@@ -28,8 +31,8 @@ cancelled? }`. A `skipped` day handed the turn on and is still owed; a
 `cancelled` day was written off. Neither is work anybody did.
 
 The activity log is the wrong source for statistics: it is capped at
-`limit(50)` with no date filter, and it is append-only, so undoing a completion
-writes a second record rather than removing the first.
+`LOG_FEED_LIMIT` records with no date filter, and it is append-only, so undoing
+a completion writes a second record rather than removing the first.
 
 # Adding a field to a chore
 
