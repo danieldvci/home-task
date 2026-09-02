@@ -1,0 +1,8 @@
+---
+description: Open product defects still to fix
+alwaysApply: true
+---
+
+Read `DEFECTS.md` in the repo root when the work is a bug or a fix. Keep that
+file current: new defects go under Open; resolved ones move to Fixed with the
+date. Do not invent a second list.
