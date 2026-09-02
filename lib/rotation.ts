@@ -24,6 +24,23 @@ export type ChoreCompletion = {
   // on and leaves the day owed, so without this an occurrence nobody ever
   // completes stays outstanding for good.
   cancelled?: boolean;
+  // A relocated occurrence, written as a linked pair: `movedTo` on the day it
+  // left, `movedFrom` on the day it landed on. Each half stands alone -
+  // `movedTo` suppresses its day and `movedFrom` creates one - so if pruning
+  // removes the partner the schedule still reads correctly and only the
+  // provenance is lost.
+  movedTo?: string;
+  movedFrom?: string;
+  // The other day of a swap, so either end can undo it.
+  swappedWith?: string;
+  // Who owes this one day, overriding the projection. Used by a swap, and by a
+  // move to pin the occurrence to whoever owed it before it was dragged.
+  // Deliberately not `rotation`, which would move every other day with it.
+  assignedTo?: string;
+  // Scheduling metadata only: nothing has been done on this day yet. Without
+  // it a day relocated in advance is indistinguishable from a finished one,
+  // because both carry a userId and a timestamp.
+  pending?: boolean;
 };
 
 export type Chore = {
@@ -150,6 +167,16 @@ export const choreOccursOnDate = (chore: Chore, date: Date, fallbackAnchor: Date
   // rotation projection that consumes a turn per open occurrence.
   const start = choreStartDate(chore);
   if (start !== null && normalizeDay(date).getTime() < start.getTime()) return false;
+
+  // A relocated occurrence overrides the recurrence at both ends, and is read
+  // here for the same reason the gate above is: every reader inherits it. The
+  // map lookup is guarded because most days are decided by the rules below and
+  // this runs once per day of a walk that can cover a year.
+  if (chore.completions) {
+    const record = chore.completions[dayKey(date)];
+    if (record?.movedTo) return false;
+    if (record?.movedFrom) return true;
+  }
 
   if (chore.frequency === 'daily') return true;
   if (chore.frequency === 'once') {
@@ -280,7 +307,32 @@ export type ResolvedCompletion = {
   inferred: boolean;
   skipped: boolean;
   cancelled: boolean;
+  // Where a relocated occurrence went, or came from. See `ChoreCompletion`.
+  movedTo: string | null;
+  movedFrom: string | null;
+  swappedWith: string | null;
+  /** Resident this one day was handed to, overriding the projection. */
+  assignedTo: string | null;
+  /** The record only places the day; nothing has been done on it. */
+  pending: boolean;
 };
+
+/**
+ * True when a record is work somebody actually did.
+ *
+ * Every reader that needs this used to spell out the flags meaning "not done".
+ * A record carries a `userId` whatever it was written for, so each flag added
+ * since has had to be added to all of them at once, and the one that was missed
+ * counted skipped days as completions in the activity chart. Ask here instead.
+ */
+export const isCompletedRecord = (record: {
+  skipped?: boolean;
+  cancelled?: boolean;
+  // Accepts a raw `ChoreCompletion` and a resolved one, which differ only in
+  // whether an absent field reads as undefined or null.
+  movedTo?: string | null;
+  pending?: boolean;
+}) => !record.skipped && !record.cancelled && !record.movedTo && !record.pending;
 
 // Any recorded outcome for the day: completed, skipped or cancelled.
 export const getDayRecord = (chore: Chore, day: Date): ResolvedCompletion | null => {
@@ -294,7 +346,12 @@ export const getDayRecord = (chore: Chore, day: Date): ResolvedCompletion | null
       at: entry.at ?? null,
       inferred: false,
       skipped: !!entry.skipped,
-      cancelled: !!entry.cancelled
+      cancelled: !!entry.cancelled,
+      movedTo: entry.movedTo ?? null,
+      movedFrom: entry.movedFrom ?? null,
+      swappedWith: entry.swappedWith ?? null,
+      assignedTo: entry.assignedTo ?? null,
+      pending: !!entry.pending
     };
   }
   // Once a chore carries a completions map it is the only source of truth;
@@ -308,7 +365,12 @@ export const getDayRecord = (chore: Chore, day: Date): ResolvedCompletion | null
       at: chore.lastCompletedAt,
       inferred: true,
       skipped: false,
-      cancelled: false
+      cancelled: false,
+      movedTo: null,
+      movedFrom: null,
+      swappedWith: null,
+      assignedTo: null,
+      pending: false
     };
   }
   return null;
@@ -320,7 +382,7 @@ export const getDayRecord = (chore: Chore, day: Date): ResolvedCompletion | null
  */
 export const getCompletion = (chore: Chore, day: Date): ResolvedCompletion | null => {
   const record = getDayRecord(chore, day);
-  return record && !record.skipped && !record.cancelled ? record : null;
+  return record && isCompletedRecord(record) ? record : null;
 };
 
 export const isDoneOnDay = (chore: Chore, day: Date) => getCompletion(chore, day) !== null;
@@ -334,10 +396,40 @@ const pruneCompletions = (completions: Record<string, ChoreCompletion>, today: D
   const kept = keys.slice(Math.max(0, keys.length - COMPLETIONS_MAX_ENTRIES));
   const out: Record<string, ChoreCompletion> = {};
   for (const key of kept) out[key] = completions[key];
+
+  // A relocation is two records and neither is meaningful alone: keeping only
+  // `movedFrom` leaves the day it came from occurring again alongside it, and
+  // keeping only `movedTo` removes the occurrence entirely. A half whose
+  // partner did not survive is dropped so both days revert to the recurrence.
+  // Records that carry an outcome are never dropped; losing work somebody did
+  // is worse than a stale occurrence in a window this old.
+  for (const key of Object.keys(out)) {
+    const record = out[key];
+    if (!record.pending) continue;
+    const partner = record.movedTo ?? record.movedFrom ?? null;
+    if (partner && !out[partner]) delete out[key];
+  }
   return out;
 };
 
-// Firestore map fields are replaced wholesale, so both writers rebuild the map.
+/**
+ * Where the day sits in the schedule, as opposed to what happened on it.
+ *
+ * These outlive an outcome. Completing a relocated day overwrites its record,
+ * and dropping `movedFrom` there would take the day off the calendar along with
+ * the completion just written to it; undoing would do the same, and would also
+ * hand a swapped day back to the resident who traded it away.
+ */
+const schedulingFields = (record?: ChoreCompletion): Partial<ChoreCompletion> => {
+  const kept: Partial<ChoreCompletion> = {};
+  if (record?.movedTo) kept.movedTo = record.movedTo;
+  if (record?.movedFrom) kept.movedFrom = record.movedFrom;
+  if (record?.assignedTo) kept.assignedTo = record.assignedTo;
+  if (record?.swappedWith) kept.swappedWith = record.swappedWith;
+  return kept;
+};
+
+// Firestore map fields are replaced wholesale, so every writer rebuilds the map.
 export const withCompletion = (
   chore: Chore,
   day: Date,
@@ -345,13 +437,123 @@ export const withCompletion = (
   today: Date = new Date()
 ) => {
   const next = pruneCompletions({ ...(chore.completions || {}) }, today);
-  next[dayKey(day)] = entry;
+  const key = dayKey(day);
+  // `entry` wins on conflict, and carries no `pending`, so recording an outcome
+  // on a placeholder clears it.
+  next[key] = { ...schedulingFields(next[key]), ...entry };
   return next;
 };
 
 export const withoutCompletion = (chore: Chore, day: Date, today: Date = new Date()) => {
   const next = pruneCompletions({ ...(chore.completions || {}) }, today);
-  delete next[dayKey(day)];
+  const key = dayKey(day);
+  const previous = next[key];
+  const kept = schedulingFields(previous);
+
+  // A day that was moved or swapped keeps its place when its outcome is undone;
+  // only a record that was nothing but an outcome disappears entirely.
+  if (previous && Object.keys(kept).length > 0) {
+    next[key] = {
+      ...kept,
+      userId: kept.assignedTo ?? previous.userId,
+      at: previous.at,
+      pending: true
+    };
+  } else {
+    delete next[key];
+  }
+  return next;
+};
+
+/**
+ * Both halves of a relocation in one map, so a single document update applies
+ * them atomically.
+ *
+ * Dragging an occurrence back where it came from clears the relocation instead
+ * of stacking a second one, which keeps a day that has been nudged back and
+ * forth from accumulating markers it no longer needs.
+ */
+export const withMovedOccurrence = (
+  chore: Chore,
+  from: Date,
+  to: Date,
+  owedBy: string,
+  today: Date = new Date()
+) => {
+  const next = pruneCompletions({ ...(chore.completions || {}) }, today);
+  const fromKey = dayKey(from);
+  const toKey = dayKey(to);
+  const at = new Date().toISOString();
+
+  const source = next[fromKey];
+  if (source?.pending && source.movedFrom === toKey) {
+    delete next[fromKey];
+    if (next[toKey]?.pending) delete next[toKey];
+    return next;
+  }
+
+  // The landing day carries no record of its own: a day the occurrence could be
+  // dropped on is one the chore does not already fall on, and a day that has
+  // been rearranged is not offered as a target.
+  next[fromKey] = { userId: owedBy, at, movedTo: toKey, pending: true };
+  next[toKey] = { userId: owedBy, at, movedFrom: fromKey, assignedTo: owedBy, pending: true };
+  return next;
+};
+
+/**
+ * Two days trade residents. Both keep their occurrence; only who owes them
+ * changes, and only on those days - `rotation` is untouched because reordering
+ * it would move every other day too.
+ */
+export const withSwappedDays = (
+  chore: Chore,
+  dayA: Date,
+  userA: string,
+  dayB: Date,
+  userB: string,
+  today: Date = new Date()
+) => {
+  const next = pruneCompletions({ ...(chore.completions || {}) }, today);
+  const keyA = dayKey(dayA);
+  const keyB = dayKey(dayB);
+  const at = new Date().toISOString();
+
+  next[keyA] = {
+    ...schedulingFields(next[keyA]),
+    userId: userB,
+    at,
+    assignedTo: userB,
+    swappedWith: keyB,
+    pending: true
+  };
+  next[keyB] = {
+    ...schedulingFields(next[keyB]),
+    userId: userA,
+    at,
+    assignedTo: userA,
+    swappedWith: keyA,
+    pending: true
+  };
+  return next;
+};
+
+/**
+ * Withdraw a move or a swap from either end.
+ *
+ * Only a placeholder can be withdrawn. Once a relocated day has been completed
+ * its `movedFrom` is what keeps that completion on the calendar, so the
+ * relocation has to stay. The partner is cleaned up when it is present and its
+ * absence is not an error, because pruning can remove one half of a pair.
+ */
+export const withoutRearrangement = (chore: Chore, day: Date, today: Date = new Date()) => {
+  const next = pruneCompletions({ ...(chore.completions || {}) }, today);
+  const key = dayKey(day);
+  const record = next[key];
+  if (!record) return next;
+
+  const partnerKey = record.movedTo ?? record.movedFrom ?? record.swappedWith ?? null;
+  if (record.pending) delete next[key];
+  if (partnerKey && next[partnerKey]?.pending) delete next[partnerKey];
   return next;
 };
 
@@ -373,7 +575,11 @@ export const currentIndexAfterUndo = (
 ) => {
   if (normalizeDay(day).getTime() > normalizeDay(today).getTime()) return chore.currentIndex;
   const key = dayKey(day);
-  const hasLaterRecord = Object.keys(chore.completions || {}).some(k => k > key);
+  const completions = chore.completions || {};
+  // Only a record that moved the pointer blocks the rewind. A day that was
+  // merely moved or swapped left the queue where it was, so counting it would
+  // strand the turn away from the resident this undo is handing it back to.
+  const hasLaterRecord = Object.keys(completions).some(k => k > key && !completions[k].pending);
   return hasLaterRecord ? chore.currentIndex : restoredIndex;
 };
 
@@ -388,7 +594,7 @@ export const dayKeyToDate = (key: string) => {
 // newest entry so the two representations can never disagree.
 export const completionMarkers = (completions: Record<string, ChoreCompletion>) => {
   const keys = Object.keys(completions)
-    .filter(key => !completions[key].skipped && !completions[key].cancelled)
+    .filter(key => isCompletedRecord(completions[key]))
     .sort();
   const newest = keys[keys.length - 1];
   if (!newest) return { lastCompletedAt: null, lastCompletedLogId: null };
@@ -427,7 +633,12 @@ export const projectAssigneeIndex = (
 
   for (const day of days) {
     const record = getDayRecord(chore, day);
-    if (record) {
+    // A day handed to someone by a move or a swap takes its turn like any
+    // other and re-anchors nothing, even once it has been completed. A swap is
+    // a trade rather than a queue change: without this, the resident who took
+    // Monday off someone would re-anchor the walk onto themselves and take
+    // Tuesday off the person who was already due it.
+    if (record && !record.assignedTo) {
       const recorded = record.userId ? chore.rotation.indexOf(record.userId) : -1;
       // A skip resolves the day onto the next available resident and, like a
       // completion, takes no turn of its own: the pointer already moved.
@@ -482,6 +693,12 @@ export type DayAssignment = {
   cancelledBy: string | null;
   // Nobody in the rotation is available, so `userId` is a placeholder.
   everyoneAway: boolean;
+  // The day this occurrence was dragged here from, when it was moved.
+  movedFrom: string | null;
+  // Resident this single day was handed to by a move or a swap.
+  assignedTo: string | null;
+  // The other day of a swap, so either end can undo it.
+  swappedWith: string | null;
 };
 
 // The single entry point for "who owns this chore on this day".
@@ -492,7 +709,12 @@ export const resolveDayAssignee = (
   today: Date = new Date()
 ): DayAssignment => {
   const record = getDayRecord(chore, day);
-  const completion = record && !record.skipped && !record.cancelled ? record : null;
+  const completion = record && isCompletedRecord(record) ? record : null;
+  const rearrangement = {
+    movedFrom: record?.movedFrom ?? null,
+    assignedTo: record?.assignedTo ?? null,
+    swappedWith: record?.swappedWith ?? null
+  };
 
   // Closed without being done: the day is resolved, so it stays pinned to the
   // resident who owed it rather than following the pointer.
@@ -508,7 +730,8 @@ export const resolveDayAssignee = (
       inferred: false,
       skippedBy: null,
       cancelledBy: record.userId,
-      everyoneAway: false
+      everyoneAway: false,
+      ...rearrangement
     };
   }
 
@@ -524,7 +747,8 @@ export const resolveDayAssignee = (
       inferred: false,
       skippedBy: null,
       cancelledBy: null,
-      everyoneAway: false
+      everyoneAway: false,
+      ...rearrangement
     };
   }
 
@@ -543,11 +767,17 @@ export const resolveDayAssignee = (
       inferred: true,
       skippedBy: null,
       cancelledBy: null,
-      everyoneAway: false
+      everyoneAway: false,
+      ...rearrangement
     };
   }
 
-  const index = projectAssigneeIndex(chore, users, chore.currentIndex, today, day);
+  // The projection runs either way, so the turn this day consumes is the same
+  // whether or not somebody was handed it: an override changes who does this
+  // one day, never what the queue does afterwards.
+  const projected = projectAssigneeIndex(chore, users, chore.currentIndex, today, day);
+  const handedTo = record?.assignedTo ? (chore.rotation?.indexOf(record.assignedTo) ?? -1) : -1;
+  const index = handedTo >= 0 ? handedTo : projected;
   return {
     dayKey: dayKey(day),
     index,
@@ -558,6 +788,9 @@ export const resolveDayAssignee = (
     inferred: false,
     skippedBy: record?.skipped ? record.userId : null,
     cancelledBy: null,
-    everyoneAway: isEveryoneAwayOnDay(chore, users, day)
+    // A resident who was handed the day is on duty whether or not the rest of
+    // the household is away; the placeholder only applies to a projected turn.
+    everyoneAway: handedTo >= 0 ? false : isEveryoneAwayOnDay(chore, users, day),
+    ...rearrangement
   };
 };

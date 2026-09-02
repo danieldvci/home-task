@@ -287,6 +287,38 @@ async function main() {
     await assertFails(setDoc(doc(owner(), path('chores', 'chore2')), chore({ notes: 'לא קיים' })));
   });
 
+  await test('moving and swapping days need no rule change, because entries are opaque', async () => {
+    // Rules cannot iterate map values, so `completions` is validated only as a
+    // map. That is what lets a relocation ship without touching the key-count
+    // check every other chore field has to be added to.
+    await assertSucceeds(
+      updateDoc(doc(owner(), path('chores', CHORE)), {
+        completions: {
+          '2026-08-24': { userId: RESIDENT, at: '2026-08-24T09:00:00.000Z', movedTo: '2026-08-26', pending: true },
+          '2026-08-26': {
+            userId: RESIDENT,
+            at: '2026-08-24T09:00:00.000Z',
+            movedFrom: '2026-08-24',
+            assignedTo: RESIDENT,
+            pending: true
+          }
+        }
+      })
+    );
+  });
+
+  await test('a member can rearrange days, which rules cannot restrict to the owner', async () => {
+    // Documented trade-off: `completions` is on the non-owner allowlist because
+    // marking done lives there too, so the admin gate is client-side only.
+    await assertSucceeds(
+      updateDoc(doc(member(), path('chores', CHORE)), {
+        completions: {
+          '2026-08-25': { userId: RESIDENT, at: '2026-08-25T09:00:00.000Z', assignedTo: 'resident2', swappedWith: '2026-08-27', pending: true }
+        }
+      })
+    );
+  });
+
   await test('a chore may record the day it starts from', async () => {
     await assertSucceeds(
       setDoc(doc(owner(), path('chores', 'chore4')), chore({ startDate: '2026-08-24T00:00:00.000Z' }))

@@ -16,7 +16,10 @@ import {
   projectAssigneeIndex,
   resolveDayAssignee,
   withCompletion,
-  withoutCompletion
+  withMovedOccurrence,
+  withoutCompletion,
+  withoutRearrangement,
+  withSwappedDays
 } from '../lib/rotation';
 import type { Chore, RotationUser } from '../lib/rotation';
 
@@ -455,6 +458,186 @@ const trio = [present('u1'), present('u2'), present('u3')];
   const reopened = resolveDayAssignee(restored, trio, TUE, TUE);
   assert.equal(reopened.done, false, 'the day is open again');
   assert.equal(reopened.userId, 'u1', 'and the turn is back with the completer');
+}
+
+// --- Moving and swapping days ----------------------------------------------
+// A dragged occurrence must not change how many turns the rotation hands out.
+// Getting this wrong is silent: the grid looks right and one resident quietly
+// gets two turns in a row.
+
+const shiftDay = (base: Date, days: number) => {
+  const d = new Date(base);
+  d.setDate(d.getDate() + days);
+  return d;
+};
+
+{
+  // Mondays, Wednesdays and Fridays, so there are empty days to move onto.
+  const mwf = makeChore({ frequency: 'custom_days', customDays: [1, 3, 5], currentIndex: 0 });
+  assert.equal(resolveDayAssignee(mwf, trio, WED, MON).userId, 'u2', 'Wednesday is u2 to begin with');
+  assert.equal(resolveDayAssignee(mwf, trio, FRI, MON).userId, 'u3', 'and Friday is u3');
+
+  const moved = { ...mwf, completions: withMovedOccurrence(mwf, WED, THU, 'u2', MON) };
+
+  assert.equal(choreOccursOnDate(moved, WED, MON), false, 'the day it left no longer occurs');
+  assert.equal(choreOccursOnDate(moved, THU, MON), true, 'the day it landed on does, against the recurrence');
+  assert.deepEqual(
+    listOccurrenceDates(moved, MON, FRI).map(dayKey),
+    [dayKey(THU), dayKey(FRI)],
+    'the occurrence walk follows it, so every reader does'
+  );
+
+  const landed = resolveDayAssignee(moved, trio, THU, MON);
+  assert.equal(landed.userId, 'u2', 'it stays with whoever owed it');
+  assert.equal(landed.movedFrom, dayKey(WED), 'and remembers where it came from');
+  assert.equal(
+    resolveDayAssignee(moved, trio, FRI, MON).userId,
+    'u3',
+    'Friday is untouched: the pair consumes exactly one turn between them'
+  );
+
+  // Completing the relocated day must not send it back to Wednesday.
+  const done = {
+    ...moved,
+    completions: withCompletion(moved, THU, { userId: 'u2', logId: 'l9', at: THU.toISOString() }, MON)
+  };
+  assert.equal(choreOccursOnDate(done, THU, MON), true, 'completing it keeps it on its new day');
+  assert.equal(choreOccursOnDate(done, WED, MON), false, 'and does not resurrect the old one');
+  assert.equal(resolveDayAssignee(done, trio, THU, MON).done, true, 'the completion lands on the new day');
+  assert.equal(
+    resolveDayAssignee(done, trio, FRI, MON).userId,
+    'u3',
+    'and still costs the queue one turn, not two'
+  );
+
+  // Undoing the completion reopens the day where it now sits.
+  const reopened = { ...done, completions: withoutCompletion(done, THU, MON) };
+  assert.equal(choreOccursOnDate(reopened, THU, MON), true, 'undo leaves the move in place');
+  assert.equal(resolveDayAssignee(reopened, trio, THU, MON).done, false, 'the day is open again');
+  assert.equal(resolveDayAssignee(reopened, trio, THU, MON).userId, 'u2', 'and owed by the same resident');
+
+  // Dragging it home clears the relocation rather than stacking another.
+  const home = { ...moved, completions: withMovedOccurrence(moved, THU, WED, 'u2', MON) };
+  assert.deepEqual(home.completions, {}, 'moving an occurrence back where it came from leaves no markers');
+  assert.equal(choreOccursOnDate(home, WED, MON), true, 'and the recurrence takes over again');
+
+  // Either end can withdraw it.
+  for (const end of [WED, THU]) {
+    const undone = { ...moved, completions: withoutRearrangement(moved, end, MON) };
+    assert.deepEqual(undone.completions, {}, `withdrawing from ${dayKey(end)} clears both halves`);
+  }
+}
+
+{
+  // A swap is a trade between two days, not a change to the queue.
+  const daily = makeChore({ currentIndex: 0 });
+  assert.equal(resolveDayAssignee(daily, trio, MON, MON).userId, 'u1');
+  assert.equal(resolveDayAssignee(daily, trio, WED, MON).userId, 'u3');
+
+  const swapped = { ...daily, completions: withSwappedDays(daily, MON, 'u1', WED, 'u3', MON) };
+  assert.equal(resolveDayAssignee(swapped, trio, MON, MON).userId, 'u3', 'Monday is taken over');
+  assert.equal(resolveDayAssignee(swapped, trio, WED, MON).userId, 'u1', 'and Wednesday goes the other way');
+  assert.equal(choreOccursOnDate(swapped, MON, MON), true, 'both days keep their occurrence');
+  assert.equal(choreOccursOnDate(swapped, WED, MON), true);
+  assert.equal(
+    resolveDayAssignee(swapped, trio, TUE, MON).userId,
+    'u2',
+    'the day between them is not dragged along'
+  );
+  assert.equal(resolveDayAssignee(swapped, trio, THU, MON).userId, 'u1', 'nor is the day after');
+
+  // The case the pointer rule exists for: a completed swap must not re-anchor.
+  const afterDone = {
+    ...swapped,
+    completions: withCompletion(swapped, MON, { userId: 'u3', logId: 'l3', at: MON.toISOString() }, MON)
+  };
+  assert.equal(resolveDayAssignee(afterDone, trio, MON, MON).completedBy, 'u3', 'u3 gets the credit');
+  assert.equal(
+    resolveDayAssignee(afterDone, trio, TUE, MON).userId,
+    'u2',
+    'but taking Monday off u1 does not also take Tuesday off u2'
+  );
+  assert.equal(resolveDayAssignee(afterDone, trio, WED, MON).userId, 'u1', 'and u1 still owes the day they traded for');
+
+  const withdrawn = { ...swapped, completions: withoutRearrangement(swapped, WED, MON) };
+  assert.deepEqual(withdrawn.completions, {}, 'undoing a swap from either end clears both days');
+  assert.equal(resolveDayAssignee(withdrawn, trio, MON, MON).userId, 'u1', 'and the queue is back as it was');
+}
+
+{
+  // Retention: half a relocation is worse than none of it. The two days sit
+  // either side of the age cutoff, well clear of it so a daylight-saving shift
+  // in the window cannot decide the result.
+  const src = shiftDay(TUE, -200);
+  const tgt = shiftDay(TUE, -175);
+  const straddling = makeChore({
+    completions: {
+      [dayKey(src)]: { userId: 'u1', at: src.toISOString(), movedTo: dayKey(tgt), pending: true },
+      [dayKey(tgt)]: {
+        userId: 'u1',
+        at: src.toISOString(),
+        movedFrom: dayKey(src),
+        assignedTo: 'u1',
+        pending: true
+      }
+    }
+  });
+  const pruned = withCompletion(straddling, TUE, { userId: 'u1', at: TUE.toISOString() }, TUE);
+  assert.equal(dayKey(src) in pruned, false, 'the older half ages out');
+  assert.equal(
+    dayKey(tgt) in pruned,
+    false,
+    'and the surviving half goes with it, rather than leaving the occurrence on two days at once'
+  );
+
+  const recent = makeChore({
+    completions: {
+      [dayKey(shiftDay(TUE, -10))]: {
+        userId: 'u1',
+        at: TUE.toISOString(),
+        movedTo: dayKey(shiftDay(TUE, -8)),
+        pending: true
+      },
+      [dayKey(shiftDay(TUE, -8))]: {
+        userId: 'u1',
+        at: TUE.toISOString(),
+        movedFrom: dayKey(shiftDay(TUE, -10)),
+        assignedTo: 'u1',
+        pending: true
+      }
+    }
+  });
+  const keptWhole = withCompletion(recent, TUE, { userId: 'u1', at: TUE.toISOString() }, TUE);
+  assert.equal(Object.keys(keptWhole).length, 3, 'an intact pair inside the window is left alone');
+}
+
+{
+  // A rearranged day never moved the pointer, so it must not block a rewind.
+  const completions = {
+    [dayKey(TUE)]: { userId: 'u1', logId: 'l1', at: TUE.toISOString() },
+    [dayKey(WED)]: {
+      userId: 'u3',
+      at: WED.toISOString(),
+      assignedTo: 'u3',
+      swappedWith: dayKey(FRI),
+      pending: true
+    }
+  };
+  assert.equal(
+    currentIndexAfterUndo(makeChore({ currentIndex: 2, completions }), TUE, 0, THU),
+    0,
+    'a later day that was only rearranged still lets undo hand the turn back'
+  );
+
+  const laterCompletion = {
+    [dayKey(TUE)]: { userId: 'u1', logId: 'l1', at: TUE.toISOString() },
+    [dayKey(WED)]: { userId: 'u2', logId: 'l2', at: WED.toISOString() }
+  };
+  assert.equal(
+    currentIndexAfterUndo(makeChore({ currentIndex: 2, completions: laterCompletion }), TUE, 0, THU),
+    2,
+    'but a later completion did move it, and rewinding would hand the same turn out twice'
+  );
 }
 
 console.log('rotation tests passed');

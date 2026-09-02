@@ -87,6 +87,31 @@ const TRIO = ['u1', 'u2', 'u3'];
 }
 
 {
+  // A day that was only moved or swapped carries a resident and a timestamp
+  // like any other record, so a chart that decides by listing the flags that
+  // mean "not done" credits nobody's work to somebody.
+  const chore = makeChore({
+    completions: {
+      [dayKey(TUE)]: { ...done('u1', TUE), movedTo: dayKey(MON), pending: true },
+      [dayKey(MON)]: { ...done('u1', MON), movedFrom: dayKey(TUE), assignedTo: 'u1', pending: true }
+    }
+  });
+  const days = activityByDay([chore], TRIO, 2, TUE);
+  assert.equal(busiestDay(days), 0, 'rearranging a day is not work anybody did');
+  assert.deepEqual(days.flatMap(d => d.entries), [], 'and contributes no breakdown row');
+
+  // Once it is actually done, on its new day, it counts exactly once.
+  const finished = makeChore({
+    completions: {
+      [dayKey(TUE)]: { ...done('u1', TUE), movedTo: dayKey(MON), pending: true },
+      [dayKey(MON)]: { ...done('u1', MON), movedFrom: dayKey(TUE), assignedTo: 'u1' }
+    }
+  });
+  const after = activityByDay([finished], TRIO, 2, TUE);
+  assert.deepEqual(after.map(d => d.total), [1, 0], 'the completion counts on the day it moved to');
+}
+
+{
   // Their completions stay in the map after they leave, but the chart has no
   // resident to draw them as, so counting them would make the total exceed the
   // segments.

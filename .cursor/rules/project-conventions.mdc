@@ -26,9 +26,16 @@ Resolve a photo with `resolvePhoto` in `app/page.tsx`, which falls back to the
 Google account picture when the Firestore document has none, and hand the result
 to `Avatar` (or down to a child component) as `photoURL`.
 
-`chore.completions` is keyed `YYYY-MM-DD` and holds `{ userId, at, skipped?,
-cancelled? }`. A `skipped` day handed the turn on and is still owed; a
-`cancelled` day was written off. Neither is work anybody did.
+`chore.completions` is keyed `YYYY-MM-DD` and holds one record per resolved or
+rearranged day. Beyond `userId` and `at`: `skipped` handed the turn on and is
+still owed, `cancelled` was written off, `movedTo`/`movedFrom` relocate the
+occurrence, `assignedTo` hands one day to someone without touching `rotation`,
+and `pending` marks a record that only places the day.
+
+Never ask "is this real work" by listing the flags that mean it is not — that is
+how the activity chart came to count skipped days. Call `isCompletedRecord` in
+`lib/rotation.ts`, so the next flag is a one-line change there instead of a bug
+in whichever reader was forgotten.
 
 The activity log is the wrong source for statistics: it is capped at
 `LOG_FEED_LIMIT` records with no date filter, and it is append-only, so undoing

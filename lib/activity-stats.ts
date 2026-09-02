@@ -1,4 +1,4 @@
-import { dayKey } from './rotation';
+import { dayKey, isCompletedRecord } from './rotation';
 import type { Chore } from './rotation';
 import { shiftDays } from './schedule-view';
 
@@ -61,7 +61,7 @@ export const activityByDay = (
     for (const [key, record] of Object.entries(chore.completions)) {
       // A skipped day handed the turn on and a cancelled day was written off.
       // Neither is work anybody did.
-      if (record.skipped || record.cancelled) continue;
+      if (!isCompletedRecord(record)) continue;
       if (!counted.has(record.userId)) continue;
       const tally = byKey.get(key);
       if (!tally) continue;

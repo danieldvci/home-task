@@ -71,11 +71,12 @@ import {
   DEFAULT_CATEGORY,
   buildScheduleRows,
   dayStripDays,
+  dropTargets,
   missedOccurrences,
   shiftDays,
   weekAround
 } from '../lib/schedule-view';
-import type { ScheduleFilters } from '../lib/schedule-view';
+import type { DropKind, ScheduleFilters } from '../lib/schedule-view';
 import { householdDisplayName, profileStorageKey } from '../lib/household-utils';
 import { describeAuthError } from '../lib/auth-errors';
 import { describeChoreChanges, frequencyLabel, joinDetails, clampDetails } from '../lib/activity';
@@ -94,7 +95,9 @@ import {
   normalizeDay,
   resolveDayAssignee,
   withCompletion,
-  withoutCompletion
+  withMovedOccurrence,
+  withoutCompletion,
+  withSwappedDays
 } from '../lib/rotation';
 import type { Chore } from '../lib/rotation';
 import { useToast } from '../components/Toast';
@@ -297,6 +300,11 @@ export default function ChoresApp() {
   const [composingManualLog, setComposingManualLog] = useState(false);
   const [quickTaskSourceId, setQuickTaskSourceId] = useState<string | null>(null);
   const [actionBusy, setActionBusy] = useState(false);
+  // Rearranging keeps its own guard rather than sharing `actionBusy`. That flag
+  // is held across every other action, so a drop that landed while one was
+  // finishing was thrown away without a word - which read as the grid ignoring
+  // the drag. A ref, because two drops in the same tick must not both pass.
+  const rearrangeInFlight = useRef(false);
   const [pickingProfile, setPickingProfile] = useState(false);
   const [newHomeName, setNewHomeName] = useState('');
   const [renameHomeName, setRenameHomeName] = useState('');
@@ -990,6 +998,76 @@ export default function ChoresApp() {
     }
   };
 
+  // Dragging a day in the week grid: onto an empty day it moves the occurrence,
+  // onto somebody else's it trades the two.
+  //
+  // Both are a pair of records in the one completions map, so a single update
+  // applies them atomically. `rotation` is deliberately untouched - reordering
+  // it is what the swap action does, and that moves every other day too.
+  //
+  // Resolves once the change has committed, which is what the grid waits on to
+  // stop showing the row as saving.
+  const rearrangeDay = async (choreId: string, from: Date, to: Date, kind: DropKind) => {
+    if (!householdId || !isAdmin || rearrangeInFlight.current) return;
+    if (!chores.some(c => c.id === choreId)) return;
+
+    const choreRef = doc(db, 'households', householdId, 'chores', choreId);
+    rearrangeInFlight.current = true;
+    try {
+      const result = await runTransaction(db, async (tx) => {
+        const snap = await tx.get(choreRef);
+        if (!snap.exists()) return null;
+        const fresh = { id: snap.id, ...snap.data() } as Chore;
+
+        // Re-checked against the document as it stands, through the same rule
+        // the grid offered the target with: somebody else may have completed or
+        // written off either day since this week was drawn.
+        const legal = dropTargets(fresh, users, [from, to], 0, today).find(t => t.index === 1);
+        if (!legal || legal.kind !== kind) return { stale: true as const };
+
+        const owedBy = resolveDayAssignee(fresh, users, from, today).userId;
+        const takenBy = resolveDayAssignee(fresh, users, to, today).userId ?? null;
+        if (!owedBy) return null;
+        if (kind === 'swap' && !takenBy) return { stale: true as const };
+
+        tx.update(choreRef, {
+          completions:
+            kind === 'move'
+              ? withMovedOccurrence(fresh, from, to, owedBy, today)
+              : withSwappedDays(fresh, from, owedBy, to, takenBy as string, today)
+        });
+        return { stale: false as const, name: fresh.name, owedBy, takenBy };
+      });
+
+      if (!result) return;
+      if (result.stale) {
+        showToast('היום הזה השתנה בינתיים, נסה שוב');
+        return;
+      }
+
+      // Deliberately not awaited. The day has already moved; making the grid
+      // hold its saving state for a second round trip only to write history
+      // doubled the wait, and a lost log entry is not worth a failed drop.
+      const label = (d: Date) => d.toLocaleDateString('he-IL', { day: '2-digit', month: '2-digit' });
+      void logAction(
+        kind === 'move' ? 'העברת יום' : 'החלפת ימים',
+        kind === 'move'
+          ? joinDetails(`העביר/ה את "${result.name}" מ-${label(from)} ל-${label(to)}`, [
+              `נשאר בתורו של ${nameOf(result.owedBy)}`
+            ])
+          : joinDetails(`החליף/ה ימים ב"${result.name}"`, [
+              `${label(from)} עובר ל${nameOf(result.takenBy ?? undefined)}`,
+              `${label(to)} ל${nameOf(result.owedBy)}`
+            ])
+      ).catch(console.error);
+    } catch (err) {
+      console.error(err);
+      showToast('שינוי היום נכשל');
+    } finally {
+      rearrangeInFlight.current = false;
+    }
+  };
+
   // A skip is admin-only, so undoing one is too. It hands the day back to the
   // resident who was passed over and leaves the completion markers alone,
   // exactly as the skip itself did.
@@ -1638,7 +1716,12 @@ export default function ChoresApp() {
         frequencyLabel: frequencyLabel(row.chore.frequency, row.chore.customDays),
         cells: row.cells.map(cell => {
           const u = users.find(x => x.id === cell.userId);
-          return { state: cell.state, person: u ? toWeekPerson(u) : null };
+          return {
+            state: cell.state,
+            person: u ? toWeekPerson(u) : null,
+            movedFrom: cell.movedFrom,
+            rearranged: cell.rearranged
+          };
         })
       })
     );
@@ -1662,6 +1745,15 @@ export default function ChoresApp() {
       buildScheduleRows(chores, users, weekDays, ALL_TASKS, today).length > 0;
 
     const weekRangeLabel = `${weekDays[0].toLocaleDateString('he-IL', { day: '2-digit', month: '2-digit' })} – ${weekDays[6].toLocaleDateString('he-IL', { day: '2-digit', month: '2-digit' })}`;
+
+    // Rearranging is off while a person filter is on. The grid renders another
+    // resident's day as an empty cell then, and offering it as free space would
+    // move an occurrence on top of a day the user cannot see.
+    const canRearrangeWeek = isAdmin && filters.personId === 'all';
+    const weekDropTargets = (choreId: string, dayIndex: number) => {
+      const chore = chores.find(c => c.id === choreId);
+      return chore ? dropTargets(chore, users, weekDays, dayIndex, today) : [];
+    };
 
 
     return (
@@ -1749,6 +1841,8 @@ export default function ChoresApp() {
               setSelectedDate(date);
               setTasksView('day');
             }}
+            onRearrange={canRearrangeWeek ? rearrangeDay : undefined}
+            dropTargetsFor={canRearrangeWeek ? weekDropTargets : undefined}
           />
         ) : (
           <>

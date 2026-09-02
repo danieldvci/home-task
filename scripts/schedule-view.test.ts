@@ -4,12 +4,20 @@ import {
   buildScheduleCell,
   buildScheduleRows,
   dayStripDays,
+  dropTargets,
+  isPickable,
   missedOccurrences,
   weekAround,
   shiftDays
 } from '../lib/schedule-view';
 import type { ScheduleFilters } from '../lib/schedule-view';
-import { completionMarkers, dayKey, normalizeDay } from '../lib/rotation';
+import {
+  completionMarkers,
+  dayKey,
+  normalizeDay,
+  withMovedOccurrence,
+  withSwappedDays
+} from '../lib/rotation';
 import type { Chore, RotationUser } from '../lib/rotation';
 
 // Aug 18 2026 is a Tuesday.
@@ -420,6 +428,101 @@ const ALL: ScheduleFilters = { choreIds: [], category: 'all', personId: 'all' };
       'and runs forwards one day at a time'
     );
   }
+}
+
+// --- Rearranging days -------------------------------------------------------
+
+{
+  // Mondays, Wednesdays and Fridays, so the week has both kinds of target.
+  const mwf = makeChore({ frequency: 'custom_days', customDays: [1, 3, 5] });
+  const week = weekAround(TUE);
+  const wedIndex = week.findIndex(d => dayKey(d) === dayKey(WED));
+
+  const cells = week.map(day => buildScheduleCell(mwf, trio, day, 'all', MON));
+  assert.equal(isPickable(cells[wedIndex]), true, 'an open day can be picked up');
+
+  const targets = dropTargets(mwf, trio, week, wedIndex, MON);
+  const kindAt = (day: Date) =>
+    targets.find(t => dayKey(week[t.index]) === dayKey(day))?.kind ?? null;
+
+  assert.equal(kindAt(new Date(2026, 7, 20)), 'move', 'an empty Thursday is somewhere to move to');
+  assert.equal(kindAt(new Date(2026, 7, 17)), 'swap', "another resident's Monday is a trade");
+  assert.equal(kindAt(new Date(2026, 7, 21)), 'swap', 'as is their Friday');
+  assert.equal(kindAt(WED), null, 'a day cannot be dropped on itself');
+}
+
+{
+  // Nothing to reschedule once the day is settled.
+  const week = weekAround(TUE);
+  const wedIndex = week.findIndex(d => dayKey(d) === dayKey(WED));
+
+  const done = makeChore({ completions: { [dayKey(WED)]: { userId: 'u1', at: WED.toISOString() } } });
+  assert.deepEqual(dropTargets(done, trio, week, wedIndex, MON), [], 'a finished day cannot be picked up');
+
+  const cancelled = makeChore({
+    completions: { [dayKey(WED)]: { userId: 'u1', at: WED.toISOString(), cancelled: true } }
+  });
+  assert.deepEqual(dropTargets(cancelled, trio, week, wedIndex, MON), [], 'nor can a written-off one');
+}
+
+{
+  // The chore did not exist for part of the week on screen.
+  const week = weekAround(TUE);
+  const friIndex = week.findIndex(d => dayKey(d) === dayKey(new Date(2026, 7, 21)));
+  const late = makeChore({
+    frequency: 'custom_days',
+    customDays: [1, 3, 5],
+    startDate: new Date(2026, 7, 19).toISOString()
+  });
+  const targets = dropTargets(late, trio, week, friIndex, WED);
+  assert.ok(
+    targets.every(t => normalizeDay(week[t.index]).getTime() >= normalizeDay(WED).getTime()),
+    'no day before the chore existed is offered, the same rule the schedule already applies'
+  );
+}
+
+{
+  // A day the occurrence was moved off renders empty, but it is not free.
+  const mwf = makeChore({ frequency: 'custom_days', customDays: [1, 3, 5] });
+  const week = weekAround(TUE);
+  const moved = { ...mwf, completions: withMovedOccurrence(mwf, WED, new Date(2026, 7, 20), 'u2', MON) };
+
+  const wedCell = buildScheduleCell(moved, trio, WED, 'all', MON);
+  assert.equal(wedCell.state, 'none', 'the day it left drops out of the grid');
+
+  const thuIndex = week.findIndex(d => dayKey(d) === dayKey(new Date(2026, 7, 20)));
+  const thuCell = buildScheduleCell(moved, trio, week[thuIndex], 'all', MON);
+  assert.equal(thuCell.state, 'open', 'and the day it landed on takes its place');
+  assert.equal(thuCell.movedFrom, dayKey(WED), 'which the grid can say so the date is not a mystery');
+  assert.equal(thuCell.rearranged, true, 'and is flagged as not simply whose turn it was');
+
+  const monIndex = week.findIndex(d => dayKey(d) === dayKey(MON));
+  const targets = dropTargets(moved, trio, week, monIndex, MON);
+  assert.equal(
+    targets.some(t => dayKey(week[t.index]) === dayKey(WED)),
+    false,
+    'the vacated day is not offered as free space, which would relocate onto a suppressed day'
+  );
+}
+
+{
+  // A swap leaves both days in place and both flagged.
+  const daily = makeChore();
+  const swapped = { ...daily, completions: withSwappedDays(daily, MON, 'u1', WED, 'u3', MON) };
+
+  const mon = buildScheduleCell(swapped, trio, MON, 'all', MON);
+  const wed = buildScheduleCell(swapped, trio, WED, 'all', MON);
+  assert.equal(mon.userId, 'u3', 'Monday shows who took it');
+  assert.equal(wed.userId, 'u1', 'and Wednesday who traded for it');
+  assert.equal(mon.rearranged, true, 'both are marked as arranged rather than dealt');
+  assert.equal(wed.rearranged, true);
+  assert.equal(mon.movedFrom, null, 'a swap moves nobody, so there is no origin to name');
+
+  assert.equal(
+    buildScheduleCell(swapped, trio, TUE, 'all', MON).userId,
+    'u2',
+    'and the day between them is untouched, exactly as the day list shows it'
+  );
 }
 
 console.log('schedule-view tests passed');

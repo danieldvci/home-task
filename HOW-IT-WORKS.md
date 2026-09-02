@@ -133,12 +133,23 @@ and each is also appended to the activity log.
 | Undo skip | owner | Removes the record and returns the turn. |
 | Write off | owner | Records the day as cancelled against whoever owed it. Takes no turn, so the pointer is untouched. |
 | Undo write-off | owner | Removes the record; the day is owed again. |
+| Move a day | owner | Drag a day in the week grid onto an empty one. The occurrence stops falling on the first and starts falling on the second, keeping the resident who owed it. |
+| Trade two days | owner | Drag a day onto another resident's day in the same row. Both keep their occurrence and the two residents exchange them. |
 | Swap | owner | Exchanges two residents' positions in the rotation. Note this is permanent, not a one-day trade. |
 | One-off task | owner | Creates a `once` chore on the day being viewed, for an extra round of something. |
 | Manual entry | any member | Writes a log record with no chore behind it. |
 
 Completing or skipping a future day deliberately does not move the pointer, so
 finishing Saturday's turn early cannot steal the turn from the days in between.
+
+Moving and trading are the two that do not settle a day, they only relocate it.
+Each writes a linked pair of records, and the pair between them consumes exactly
+one turn, so neither changes what the rotation does on any other day. A traded
+day in particular keeps the queue where it was even after it is completed:
+taking Monday off someone is a favour, not a claim on Tuesday as well.
+
+Dragging is disabled while a person filter is on, because the grid draws another
+resident's day as an empty cell and that would look like free space.
 
 Marking done, undoing, skipping and writing off all run inside a Firestore
 transaction, re-deciding against the stored document. Two people finishing the

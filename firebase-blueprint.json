@@ -42,9 +42,10 @@
         "completions": {
           "type": "object",
           "maxLength": 400,
-          "description": "YYYY-MM-DD -> { userId, logId, at, skipped? }; freezes each resolved occurrence to the resident who did it, or who was skipped"
+          "description": "YYYY-MM-DD -> { userId, logId, at, skipped?, cancelled?, movedTo?, movedFrom?, swappedWith?, assignedTo?, pending? }; freezes each resolved occurrence to the resident who did it, was skipped or owed it, and carries the moves and swaps that relocate a day. Entry contents are not validated by rules, only the size of the map"
         },
-        "anchorDate": { "type": "string", "maxLength": 40, "description": "Day a weekly schedule repeats from, fixed at creation" }
+        "anchorDate": { "type": "string", "maxLength": 40, "description": "Day a weekly schedule repeats from, fixed at creation" },
+        "startDate": { "type": "string", "maxLength": 40, "description": "First day the chore exists; earlier days are not occurrences it missed" }
       },
       "required": ["name", "frequency", "rotation", "currentIndex"]
     },

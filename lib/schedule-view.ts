@@ -13,7 +13,9 @@ import {
   DayAssignment,
   RotationUser,
   choreOccursOnDate,
+  choreStartDate,
   dayKey,
+  getDayRecord,
   normalizeDay,
   resolveDayAssignee
 } from './rotation';
@@ -42,6 +44,11 @@ export type ScheduleCell = {
   assignment: DayAssignment | null;
   /** The resident on duty, or null when nobody is. */
   userId: string | null;
+  /** The day this occurrence was dragged here from, when it was moved. */
+  movedFrom: string | null;
+  /** True when the resident on duty was chosen by a move or a swap rather than
+   *  by the queue, so the grid can say why it is not whose turn it looks like. */
+  rearranged: boolean;
 };
 
 export type ScheduleRow = {
@@ -63,7 +70,14 @@ const emptyCell = (day: Date): ScheduleCell => ({
   key: dayKey(day),
   state: 'none',
   assignment: null,
-  userId: null
+  userId: null,
+  movedFrom: null,
+  rearranged: false
+});
+
+const provenance = (assignment: DayAssignment) => ({
+  movedFrom: assignment.movedFrom,
+  rearranged: !!assignment.assignedTo
 });
 
 export const buildScheduleCell = (
@@ -84,7 +98,7 @@ export const buildScheduleCell = (
   if (assignment.done || assignment.cancelledBy) {
     if (personId !== 'all' && userId !== personId) return emptyCell(day);
     const state: CellState = assignment.done ? 'done' : 'cancelled';
-    return { day, key: dayKey(day), state, assignment, userId };
+    return { day, key: dayKey(day), state, assignment, userId, ...provenance(assignment) };
   }
 
   // The pointer always lands on somebody, so an open day is only genuinely
@@ -93,10 +107,26 @@ export const buildScheduleCell = (
 
   // An unowned day belongs to nobody, so it never survives a person filter.
   if (personId !== 'all' && (!owned || userId !== personId)) return emptyCell(day);
-  if (!owned) return { day, key: dayKey(day), state: 'unavailable', assignment, userId: null };
+  if (!owned) {
+    return {
+      day,
+      key: dayKey(day),
+      state: 'unavailable',
+      assignment,
+      userId: null,
+      ...provenance(assignment)
+    };
+  }
 
   const passed = normalizeDay(day).getTime() < normalizeDay(today).getTime();
-  return { day, key: dayKey(day), state: passed ? 'overdue' : 'open', assignment, userId };
+  return {
+    day,
+    key: dayKey(day),
+    state: passed ? 'overdue' : 'open',
+    assignment,
+    userId,
+    ...provenance(assignment)
+  };
 };
 
 /**
@@ -121,6 +151,60 @@ export const buildScheduleRows = (
       cells: days.map(day => buildScheduleCell(chore, users, day, filters.personId, today))
     }))
     .filter(row => row.cells.some(cell => cell.state !== 'none'));
+
+/** Dropping on an empty day relocates the occurrence; dropping on somebody
+ *  else's day trades the two. */
+export type DropKind = 'move' | 'swap';
+
+export type DropTarget = { index: number; kind: DropKind };
+
+/** A day can only be picked up while it is still owed by somebody: a finished
+ *  or written-off day has nothing left to reschedule. */
+export const isPickable = (cell: ScheduleCell) =>
+  (cell.state === 'open' || cell.state === 'overdue') && !!cell.userId;
+
+/**
+ * Which days in a row a picked occurrence may be dropped on, and what dropping
+ * there would mean.
+ *
+ * Built from the unfiltered schedule rather than the rendered row. A person
+ * filter renders another resident's day as an empty cell, and treating that as
+ * somewhere to move to would overwrite a day the user cannot even see. Callers
+ * that render filtered rows have to keep the index mapping identical, which is
+ * why this takes the same `days` array the row was built from.
+ */
+export const dropTargets = (
+  chore: Chore,
+  users: RotationUser[],
+  days: Date[],
+  sourceIndex: number,
+  today: Date
+): DropTarget[] => {
+  const cells = days.map(day => buildScheduleCell(chore, users, day, 'all', today));
+  const source = cells[sourceIndex];
+  if (!source || !isPickable(source)) return [];
+
+  const start = choreStartDate(chore);
+  const targets: DropTarget[] = [];
+
+  for (const [index, cell] of cells.entries()) {
+    if (index === sourceIndex) continue;
+    // The chore did not exist yet, so it cannot have been due then.
+    if (start && normalizeDay(cell.day).getTime() < start.getTime()) continue;
+
+    if (cell.state === 'none') {
+      // A day whose own occurrence was moved away also reads as empty. Landing
+      // on it would leave the same day both suppressed and relocated onto.
+      if (!getDayRecord(chore, cell.day)) targets.push({ index, kind: 'move' });
+      continue;
+    }
+    // Trading needs somebody on the other end to trade with, and swapping a day
+    // with itself is not a change.
+    if (isPickable(cell) && cell.userId !== source.userId) targets.push({ index, kind: 'swap' });
+  }
+
+  return targets;
+};
 
 /**
  * How far back a carried-over task is traced. Two weeks is enough to surface a
