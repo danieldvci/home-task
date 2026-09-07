@@ -45,6 +45,26 @@ not model rotation between people at all.
   not staring at an empty screen.
 - **Expenses with running balances**, which is how Flatastic keeps flatmates in
   the app between chores.
+- **Something happens when you tap done.** Today the card turns green and that
+  is the entire reward. A short celebration — a line of praise, a two-second
+  animation, an optional chime — is most of what separates a chore list a child
+  opens on purpose from one a parent has to nag them into. Notes for whoever
+  builds it:
+  - Vary the line and key it off something true: first task of the day, three
+    days running, covering somebody else's turn. A fixed `כל הכבוד` every time
+    stops registering inside a week.
+  - Derive any streak or milestone on read from `chore.completions`, like
+    everything else here. A stored counter would have to be written by whichever
+    tab happened to be open, which is exactly the trap `missedOccurrences`
+    exists to avoid.
+  - `motion/react` is already a dependency, so the animation needs no new
+    package. Honour `prefers-reduced-motion` and skip it.
+  - Sound is allowed to start, because the tap is a user gesture. But the web
+    cannot tell whether the phone is on silent, so it needs its own toggle
+    beside the reminders one in Settings and should default to off.
+  - Prefer an inline SVG or a `motion` sequence over a video or a Lottie file.
+    This installs as a PWA, so the payload is paid on first load by every
+    household, for two seconds of animation.
 
 ## Known limitations, kept deliberately
 
