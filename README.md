@@ -7,7 +7,8 @@ Built with **Next.js**, **Firebase**, and **Tailwind CSS**.
 What the app does and why it is built this way is in
 [HOW-IT-WORKS.md](HOW-IT-WORKS.md). How the code is put together — architecture,
 patterns, workflows and known limitations — is in
-[ARCHITECTURE.md](ARCHITECTURE.md).
+[ARCHITECTURE.md](ARCHITECTURE.md). The same thing described for the people who
+use it, rather than build it, is in [PRODUCT.md](PRODUCT.md).
 
 ## Run locally
 
