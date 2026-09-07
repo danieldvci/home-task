@@ -1832,6 +1832,7 @@ export default function ChoresApp() {
           <WeekOverview
             days={weekDays}
             todayStr={today.toDateString()}
+            selectedStr={selectedDateStr}
             rows={weekRows}
             legend={weekLegend}
             rangeLabel={weekRangeLabel}
