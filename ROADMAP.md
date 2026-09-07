@@ -66,6 +66,16 @@ not model rotation between people at all.
 
 - Accessibility: modal focus trap and Escape-to-close, `role="alert"` on toasts,
   accessible names on the remaining icon-only buttons.
+- The tasks tab's person filter is still a hand-rolled single-select chip strip
+  that scrolls sideways, while the task filter beside it and the person filter
+  on the history tab both use `MultiSelectFilter`. `personFilterOptions` is
+  already built and already carries avatars. Converting it means
+  `ScheduleFilters.personId` becomes `personIds: string[]`, followed by the two
+  checks in `buildScheduleCell`, the `'all'` arguments in `dropTargets` and
+  `missedOccurrences`, `canRearrangeWeek`, and three cases in
+  `scripts/schedule-view.test.ts`. Hold the state as `string[] | null` so
+  `null` can keep meaning "untouched, default to my tasks" — `currentUserId` is
+  not known on first render, which is why the `'my_tasks'` sentinel exists.
 - Service worker does not prompt a reload when a new version activates.
 - Unused dependencies: `@google/genai`, `@hookform/resolvers`,
   `class-variance-authority`.
