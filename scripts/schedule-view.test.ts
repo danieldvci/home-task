@@ -3,10 +3,12 @@ import {
   MISSED_LOOKBACK_DAYS,
   buildScheduleCell,
   buildScheduleRows,
+  carryOverLabel,
   dayStripDays,
   dropTargets,
   isPickable,
   missedOccurrences,
+  relativeDayLabel,
   weekAround,
   shiftDays
 } from '../lib/schedule-view';
@@ -522,6 +524,48 @@ const ALL: ScheduleFilters = { choreIds: [], category: 'all', personId: 'all' };
     buildScheduleCell(swapped, trio, TUE, 'all', MON).userId,
     'u2',
     'and the day between them is untouched, exactly as the day list shows it'
+  );
+}
+
+{
+  // Copy aimed at a resident. A date is only reached once a weekday name would
+  // stop saying which week it meant.
+  assert.equal(relativeDayLabel(TUE, TUE), 'מהיום', 'today is named, not dated');
+  assert.equal(relativeDayLabel(MON, TUE), 'מאתמול', 'and so is yesterday');
+
+  const saturday = new Date(2026, 7, 15, 12, 0, 0);
+  assert.equal(
+    relativeDayLabel(saturday, TUE),
+    'מיום שבת',
+    'inside the week the weekday alone places the day'
+  );
+
+  const lastWeek = new Date(2026, 7, 10, 12, 0, 0);
+  assert.equal(
+    relativeDayLabel(lastWeek, TUE).startsWith('מיום'),
+    false,
+    'past a week a weekday no longer says which week, so it falls back to the date'
+  );
+}
+
+{
+  // What the carry-over line on today's card says.
+  const daily = makeChore();
+
+  const slippedOnce = missedOccurrences(daily, trio, TUE, TUE, 1);
+  assert.equal(slippedOnce.length, 1, 'one day back, one day owed');
+  assert.equal(
+    carryOverLabel(slippedOnce, TUE),
+    'נדחה מאתמול',
+    'a single slip is dated in words a resident would use'
+  );
+
+  const slippedThrice = missedOccurrences(daily, trio, TUE, TUE, 3);
+  assert.equal(slippedThrice.length, 3, 'three days back, three owed');
+  assert.equal(
+    carryOverLabel(slippedThrice, TUE),
+    'נדחה 3 פעמים',
+    'repeated slips are counted, since that is the thing worth noticing'
   );
 }
 

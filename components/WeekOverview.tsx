@@ -9,6 +9,7 @@ import {
   CornerDownRight,
   Loader2,
   Plus,
+  Users,
   UserX,
   X
 } from 'lucide-react';
@@ -46,10 +47,10 @@ const DAY_LETTERS = ['א׳', 'ב׳', 'ג׳', 'ד׳', 'ה׳', 'ו׳', 'ש׳'];
 const STATE_LABEL: Record<CellState, string> = {
   none: '',
   open: 'ממתין',
-  overdue: 'לא בוצע',
+  overdue: 'באיחור',
   done: 'בוצע',
-  cancelled: 'נסגר ללא ביצוע',
-  unavailable: 'אין דייר זמין'
+  cancelled: 'בוטל',
+  unavailable: 'אף אחד לא פנוי'
 };
 
 // Long enough not to fire while the grid is being panned sideways, short enough
@@ -121,6 +122,15 @@ type WeekOverviewProps = {
   /** Legal drops for a picked cell. The parent computes it because it holds the
    *  chore and the residents; the grid only knows what it was handed to draw. */
   dropTargetsFor?: (choreId: string, dayIndex: number) => DropTarget[];
+  /**
+   * Clears the person filter that is currently suppressing rearranging.
+   *
+   * Supplied only when the filter is the reason, so the grid does not have to
+   * know what the reasons are. Dragging is off by default, because the tasks
+   * tab opens filtered to the signed-in resident, and a grid that silently
+   * ignores a drag is indistinguishable from a broken one.
+   */
+  onClearPersonFilter?: () => void;
 };
 
 function CellContent({ cell }: { cell: WeekCell }) {
@@ -140,11 +150,7 @@ function CellContent({ cell }: { cell: WeekCell }) {
           // A done day is marked by its badge alone. Dimming it was tuned for
           // flat initials; on a photograph it reads as broken rather than
           // finished, and it collided with the greyed-out cancelled state.
-          cell.state === 'cancelled'
-            ? 'opacity-30 grayscale'
-            : cell.state === 'overdue'
-              ? 'ring-2 ring-rose-400'
-              : ''
+          cell.state === 'cancelled' ? 'opacity-30 grayscale' : ''
         }
       />
       {cell.state === 'done' && (
@@ -152,8 +158,13 @@ function CellContent({ cell }: { cell: WeekCell }) {
           <Check className="w-2 h-2 text-white" strokeWidth={4} />
         </span>
       )}
+      {/* One mark per state, in one place. Overdue used to carry a ring round
+          the face as well as this badge, which said the same thing twice and
+          left overdue the only state shouting across the grid. */}
       {cell.state === 'overdue' && (
-        <span className="absolute -bottom-0.5 -left-0.5 w-3 h-3 rounded-full bg-rose-500 border border-white" />
+        <span className="absolute -bottom-0.5 -left-0.5 w-3 h-3 rounded-full bg-[#B9553D] flex items-center justify-center">
+          <span className="text-white text-[8px] font-black leading-none">!</span>
+        </span>
       )}
       {cell.state === 'cancelled' && (
         <span className="absolute -bottom-0.5 -left-0.5 w-3 h-3 rounded-full bg-[#A39788] flex items-center justify-center">
@@ -407,7 +418,8 @@ export function WeekOverview({
   rangeLabel,
   emptyReason = 'filtered',
   onRearrange,
-  dropTargetsFor
+  dropTargetsFor,
+  onClearPersonFilter
 }: WeekOverviewProps) {
   const canRearrange = !!onRearrange && !!dropTargetsFor;
   const [picked, setPicked] = React.useState<{ choreId: string; index: number } | null>(null);
@@ -536,6 +548,22 @@ export function WeekOverview({
   return (
     <div className="flex flex-col gap-3 pb-24">
       {nav}
+
+      {onClearPersonFilter && (
+        <div className="flex items-center justify-between gap-2 bg-[#F5F1EA] border border-[#E6E0D4] rounded-2xl px-3 py-2">
+          <span className="flex items-center gap-2 text-xs font-bold text-[#6B5E4C] min-w-0 flex-1">
+            <Users className="w-3.5 h-3.5 flex-shrink-0 text-[#8C7E6A]" />
+            <span className="truncate">גרירת ימים זמינה רק בתצוגת כל הדיירים</span>
+          </span>
+          <button
+            type="button"
+            onClick={onClearPersonFilter}
+            className="flex-shrink-0 text-xs font-bold text-[#4A6B33] px-2 py-1 rounded-lg hover:bg-white/60 transition-colors"
+          >
+            הצג את כולם
+          </button>
+        </div>
+      )}
 
       {held && (
         // Holding a day is a mode, and a mode the user cannot see is one they

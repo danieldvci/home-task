@@ -239,6 +239,41 @@ export const missedOccurrences = (
   return missed;
 };
 
+const MS_PER_DAY = 86400000;
+
+const WEEKDAY_NAMES = ['ראשון', 'שני', 'שלישי', 'רביעי', 'חמישי', 'שישי', 'שבת'];
+
+/**
+ * The day as somebody would say it out loud, for copy aimed at a resident
+ * rather than at whoever built this.
+ *
+ * A weekday name stops being useful once it is more than a week old, because
+ * "מיום שישי" no longer says which Friday, so the date takes over at seven
+ * days. Anything that is not in the past falls through to the date as well.
+ */
+export const relativeDayLabel = (day: Date, today: Date) => {
+  const diff = Math.round(
+    (normalizeDay(today).getTime() - normalizeDay(day).getTime()) / MS_PER_DAY
+  );
+  if (diff === 0) return 'מהיום';
+  if (diff === 1) return 'מאתמול';
+  if (diff > 1 && diff < 7) return `מיום ${WEEKDAY_NAMES[day.getDay()]}`;
+  return `מ־${day.toLocaleDateString('he-IL', { day: '2-digit', month: '2-digit' })}`;
+};
+
+/**
+ * The carry-over line on today's card.
+ *
+ * Counting is clearer than dating once a task has been put off more than once:
+ * the reader wants to know it keeps slipping, not which particular day it
+ * started. `missedOccurrences` returns most recent first, so the oldest entry
+ * is the one that dates the debt.
+ */
+export const carryOverLabel = (missed: ScheduleCell[], today: Date) =>
+  missed.length > 1
+    ? `נדחה ${missed.length} פעמים`
+    : `נדחה ${relativeDayLabel(missed[missed.length - 1].day, today)}`;
+
 /** The Sunday-to-Saturday week containing `date`. */
 export const weekAround = (date: Date): Date[] => {
   const sunday = normalizeDay(date);

@@ -70,13 +70,14 @@ import {
   ALL_TASKS,
   DEFAULT_CATEGORY,
   buildScheduleRows,
+  carryOverLabel,
   dayStripDays,
   dropTargets,
   missedOccurrences,
   shiftDays,
   weekAround
 } from '../lib/schedule-view';
-import type { DropKind, ScheduleFilters } from '../lib/schedule-view';
+import type { CellState, DropKind, ScheduleFilters } from '../lib/schedule-view';
 import { householdDisplayName, profileStorageKey } from '../lib/household-utils';
 import { describeAuthError } from '../lib/auth-errors';
 import { describeChoreChanges, frequencyLabel, joinDetails, clampDetails } from '../lib/activity';
@@ -109,6 +110,23 @@ import {
   remindersSupported
 } from '../lib/notifications';
 import { BellRing, BellOff } from 'lucide-react';
+
+/**
+ * One card surface per state, so the day list can be read by colour before a
+ * word of it is read.
+ *
+ * Only `open` keeps the white, lifted card: it is the one thing asking to be
+ * acted on. Everything settled or blocked drops back to the page tone so it
+ * stops competing, and `overdue` is the only state allowed to be loud.
+ */
+const CARD_SURFACE: Record<CellState, string> = {
+  none: 'bg-white border-[#E6E0D4] shadow-sm',
+  open: 'bg-white border-[#E6E0D4] shadow-sm',
+  overdue: 'bg-[#B9553D]/[0.07] border-[#B9553D]/30',
+  done: 'bg-[#A1C181]/10 border-[#A1C181]/40',
+  cancelled: 'bg-[#F5F1EA] border-[#E6E0D4]',
+  unavailable: 'bg-[#F5F1EA] border-[#E6E0D4]'
+};
 
 // --- Types ---
 type UserType = {
@@ -1683,8 +1701,6 @@ export default function ChoresApp() {
   const renderTasks = () => {
     const isPastDay = normalizeDay(selectedDate).getTime() < normalizeDay(today).getTime();
     const isToday = normalizeDay(selectedDate).getTime() === normalizeDay(today).getTime();
-    const shortDate = (d: Date) =>
-      d.toLocaleDateString('he-IL', { day: '2-digit', month: '2-digit' });
     const toWeekPerson = (u: UserType): WeekPerson => ({
       id: u.id,
       name: u.name,
@@ -1758,74 +1774,77 @@ export default function ChoresApp() {
 
     return (
       <div className="flex flex-col gap-4 pb-24">
-        
-        {/* User Filter */}
-        <div className="flex gap-2 overflow-x-auto pb-2 mb-2 no-scrollbar">
-          <button
-            onClick={() => setSelectedUserId('all')}
-            className={`flex-shrink-0 px-4 py-2 rounded-2xl text-sm font-medium transition-all border ${selectedUserId === 'all' ? 'bg-[#3D5A80] text-white border-[#3D5A80] shadow-sm' : 'bg-white text-[#8C7E6A] border-[#E6E0D4] hover:bg-[#F3EFE9]'}`}
-          >
-            כולם
-          </button>
-          {users.map(u => {
-            const isSelected = selectedUserId === 'my_tasks' ? currentUserId === u.id : selectedUserId === u.id;
-            return (
-              <button
-                key={u.id}
-                onClick={() => setSelectedUserId(u.id)}
-                className={`flex-shrink-0 flex items-center gap-2 px-3 py-1.5 rounded-2xl transition-all border ${isSelected ? 'bg-white border-[#A1C181] shadow-sm ring-1 ring-[#A1C181]/50' : 'bg-white border-[#E6E0D4] opacity-70 hover:opacity-100 hover:bg-[#F3EFE9]'}`}
-              >
-                <Avatar name={u.name} color={u.color} photoURL={resolvePhoto(u)} size="sm" />
-                <span className={`text-sm font-medium ${isSelected ? 'text-[#3D3732]' : 'text-[#8C7E6A]'}`}>
-                  {u.id === currentUserId ? 'אני' : u.name}
-                </span>
-              </button>
-            );
-          })}
-        </div>
-
-        {/* Task filter, shared by both views */}
-        <MultiSelectFilter
-          options={taskFilterOptions}
-          selectedIds={choreFilterIds}
-          onChange={setChoreFilterIds}
-          allLabel="כל המשימות בבית"
-          countNoun="משימות"
-          className="mb-2"
-        />
-
-        {/* Category Filter, shared by both views */}
-        {chores.some(c => c.category) && (
-          <div className="flex gap-2 overflow-x-auto pb-1 mb-2 no-scrollbar">
+        {/* Choosing what to look at is one decision, so it reads as one block.
+            Stacked at the section gap plus a margin each, these four bars cost
+            most of a phone screen before the first task appeared. */}
+        <div className="flex flex-col gap-2">
+          {/* User Filter */}
+          <div className="flex gap-2 overflow-x-auto pb-1 no-scrollbar">
             <button
-              onClick={() => setSelectedCategoryFilter('all')}
-              className={`flex-shrink-0 px-3 py-1.5 rounded-2xl text-xs font-medium transition-all border ${selectedCategoryFilter === 'all' ? 'bg-[#6B5E4C] text-white border-[#6B5E4C]' : 'bg-white text-[#8C7E6A] border-[#E6E0D4] hover:bg-[#F3EFE9]'}`}
+              onClick={() => setSelectedUserId('all')}
+              className={`flex-shrink-0 px-4 py-2 rounded-2xl text-sm font-medium transition-all border ${selectedUserId === 'all' ? 'bg-[#3D5A80] text-white border-[#3D5A80] shadow-sm' : 'bg-white text-[#8C7E6A] border-[#E6E0D4] hover:bg-[#F3EFE9]'}`}
             >
-              כל התחומים
+              כולם
             </button>
-            {CHORE_CATEGORIES.filter(cat => chores.some(c => (c.category || DEFAULT_CATEGORY) === cat)).map(cat => (
+            {users.map(u => {
+              const isSelected = selectedUserId === 'my_tasks' ? currentUserId === u.id : selectedUserId === u.id;
+              return (
+                <button
+                  key={u.id}
+                  onClick={() => setSelectedUserId(u.id)}
+                  className={`flex-shrink-0 flex items-center gap-2 px-3 py-1.5 rounded-2xl transition-all border ${isSelected ? 'bg-white border-[#A1C181] shadow-sm ring-1 ring-[#A1C181]/50' : 'bg-white border-[#E6E0D4] opacity-70 hover:opacity-100 hover:bg-[#F3EFE9]'}`}
+                >
+                  <Avatar name={u.name} color={u.color} photoURL={resolvePhoto(u)} size="sm" />
+                  <span className={`text-sm font-medium ${isSelected ? 'text-[#3D3732]' : 'text-[#8C7E6A]'}`}>
+                    {u.id === currentUserId ? 'אני' : u.name}
+                  </span>
+                </button>
+              );
+            })}
+          </div>
+
+          {/* Task filter, shared by both views */}
+          <MultiSelectFilter
+            options={taskFilterOptions}
+            selectedIds={choreFilterIds}
+            onChange={setChoreFilterIds}
+            allLabel="כל המשימות בבית"
+            countNoun="משימות"
+          />
+
+          {/* Category Filter, shared by both views */}
+          {chores.some(c => c.category) && (
+            <div className="flex gap-2 overflow-x-auto pb-1 no-scrollbar">
               <button
-                key={cat}
-                onClick={() => setSelectedCategoryFilter(cat)}
-                className={`flex-shrink-0 px-3 py-1.5 rounded-2xl text-xs font-medium transition-all border ${selectedCategoryFilter === cat ? 'bg-[#6B5E4C] text-white border-[#6B5E4C]' : 'bg-white text-[#8C7E6A] border-[#E6E0D4] hover:bg-[#F3EFE9]'}`}
+                onClick={() => setSelectedCategoryFilter('all')}
+                className={`flex-shrink-0 px-3 py-1.5 rounded-2xl text-xs font-medium transition-all border ${selectedCategoryFilter === 'all' ? 'bg-[#6B5E4C] text-white border-[#6B5E4C]' : 'bg-white text-[#8C7E6A] border-[#E6E0D4] hover:bg-[#F3EFE9]'}`}
               >
-                {cat}
+                כל התחומים
+              </button>
+              {CHORE_CATEGORIES.filter(cat => chores.some(c => (c.category || DEFAULT_CATEGORY) === cat)).map(cat => (
+                <button
+                  key={cat}
+                  onClick={() => setSelectedCategoryFilter(cat)}
+                  className={`flex-shrink-0 px-3 py-1.5 rounded-2xl text-xs font-medium transition-all border ${selectedCategoryFilter === cat ? 'bg-[#6B5E4C] text-white border-[#6B5E4C]' : 'bg-white text-[#8C7E6A] border-[#E6E0D4] hover:bg-[#F3EFE9]'}`}
+                >
+                  {cat}
+                </button>
+              ))}
+            </div>
+          )}
+
+          {/* Day / Week view toggle */}
+          <div className="flex bg-[#F1ECE3] border border-[#E6E0D4] rounded-2xl p-1">
+            {([['day', 'יום'], ['week', 'שבוע']] as const).map(([view, label]) => (
+              <button
+                key={view}
+                onClick={() => setTasksView(view)}
+                className={`flex-1 py-2 rounded-xl text-sm font-bold transition-all ${tasksView === view ? 'bg-white text-[#3D3732] shadow-sm' : 'text-[#8C7E6A] hover:text-[#4A443F]'}`}
+              >
+                {label}
               </button>
             ))}
           </div>
-        )}
-
-        {/* Day / Week view toggle */}
-        <div className="flex bg-[#F1ECE3] border border-[#E6E0D4] rounded-2xl p-1 mb-2">
-          {([['day', 'יום'], ['week', 'שבוע']] as const).map(([view, label]) => (
-            <button
-              key={view}
-              onClick={() => setTasksView(view)}
-              className={`flex-1 py-2 rounded-xl text-sm font-bold transition-all ${tasksView === view ? 'bg-white text-[#3D3732] shadow-sm' : 'text-[#8C7E6A] hover:text-[#4A443F]'}`}
-            >
-              {label}
-            </button>
-          ))}
         </div>
 
         {tasksView === 'week' ? (
@@ -1844,6 +1863,11 @@ export default function ChoresApp() {
             }}
             onRearrange={canRearrangeWeek ? rearrangeDay : undefined}
             dropTargetsFor={canRearrangeWeek ? weekDropTargets : undefined}
+            onClearPersonFilter={
+              isAdmin && filters.personId !== 'all'
+                ? () => setSelectedUserId('all')
+                : undefined
+            }
           />
         ) : (
           <>
@@ -1920,7 +1944,7 @@ export default function ChoresApp() {
                   initial={{ opacity: 0, y: 10 }}
                   animate={{ opacity: 1, y: 0 }}
                   key={chore.id}
-                  className={`p-5 rounded-3xl border transition-all ${done ? 'bg-[#F5F1EA] border-[#A1C181]/50' : 'bg-white border-[#E6E0D4] shadow-sm'}`}
+                  className={`p-5 rounded-3xl border transition-all ${CARD_SURFACE[cell.state]}`}
                 >
                   <div className="flex justify-between items-start mb-4">
                     {/* Yields width to the assignee chip: the badges below are
@@ -1928,49 +1952,48 @@ export default function ChoresApp() {
                         title beats a cropped face. */}
                     <div className="min-w-0 flex-1">
                       <div className="flex items-center gap-2 flex-wrap">
-                        <h3 className={`text-lg font-bold ${done ? 'text-[#6B5E4C] line-through opacity-70' : 'text-[#3D3732]'}`}>
+                        <h3 className={`text-lg font-bold ${done ? 'text-[#6B5E4C]' : 'text-[#3D3732]'}`}>
                           {chore.name}
                         </h3>
-                        {cell.state === 'overdue' && (
-                          <span className="inline-flex items-center gap-1 text-[10px] font-bold text-rose-600 bg-rose-50 px-2 py-0.5 rounded-full">
-                            <AlertTriangle className="w-3 h-3" /> לא בוצע
+                        {/* At most one pill, and only where the card surface on
+                            its own could be misread. Done needs none: the green
+                            bar below the title already says it. */}
+                        {cell.state === 'overdue' ? (
+                          <span className="inline-flex items-center gap-1 text-[10px] font-bold text-[#B9553D] bg-[#B9553D]/10 px-2 py-0.5 rounded-full">
+                            <AlertTriangle className="w-3 h-3" /> באיחור
                           </span>
-                        )}
-                        {cancelled && (
+                        ) : cancelled ? (
                           <span className="inline-flex items-center gap-1 text-[10px] font-bold text-[#8C7E6A] bg-[#F1ECE3] px-2 py-0.5 rounded-full">
-                            <X className="w-3 h-3" /> נסגר ללא ביצוע
+                            <X className="w-3 h-3" /> בוטל
                           </span>
-                        )}
+                        ) : null}
+                      </div>
+                      {/* Everything that describes the task rather than its
+                          state reads as one quiet line. As pills they were six
+                          across, all shouting as loudly as the title. */}
+                      <p className="flex items-center flex-wrap gap-x-2 gap-y-1 text-xs text-[#A39788] mt-1">
+                        <span>{frequencyLabel(chore.frequency, chore.customDays)}</span>
+                        {chore.category && <span>· {chore.category}</span>}
+                        {/* Context, not a call to action. How long this has
+                            been owed is worth being able to find out, but it
+                            must not compete with the button that clears it, so
+                            the count lives in the tooltip and only the mark
+                            stays on the card. Negative margins keep the padding
+                            that makes it tappable from inflating the line. */}
                         {missed.length > 0 && (
                           <button
                             onClick={() => setSelectedDate(missed[missed.length - 1].day)}
-                            title="עבור למועד שלא בוצע"
-                            className="inline-flex items-center gap-1 text-[10px] font-bold text-[#B9553D] bg-[#B9553D]/10 px-2 py-0.5 rounded-full hover:bg-[#B9553D]/20 transition-colors"
+                            title={`${carryOverLabel(missed, today)} · עבור ליום שממנו נדחתה`}
+                            aria-label={`${carryOverLabel(missed, today)} · עבור ליום שממנו נדחתה`}
+                            className="inline-flex items-center -my-1 -mx-1 p-1 rounded-lg text-[#B9553D] hover:bg-[#B9553D]/10 transition-colors"
                           >
-                            <AlertTriangle className="w-3 h-3" />
-                            נגרר מ־{shortDate(missed[missed.length - 1].day)}
-                            {missed.length > 1 && ` · ${missed.length} מועדים`}
+                            <AlertTriangle className="w-3.5 h-3.5" />
                           </button>
                         )}
-                        {chore.frequency === 'once' && (
-                          <span className="inline-flex items-center gap-1 text-[10px] font-bold text-[#5C4F86] bg-[#7B6CA8]/15 px-2 py-0.5 rounded-full">
-                            <Plus className="w-3 h-3" /> חד פעמי
-                          </span>
-                        )}
                         {assignment.skippedBy && (
-                          <span className="inline-flex items-center gap-1 text-[10px] font-bold text-[#8C7E6A] bg-[#F1ECE3] px-2 py-0.5 rounded-full">
-                            <FastForward className="w-3 h-3" /> דולג {nameOf(assignment.skippedBy)}
-                            {isAdmin && (
-                              <button
-                                onClick={() => handleUndoSkip(chore.id)}
-                                disabled={actionBusy}
-                                title="בטל דילוג"
-                                aria-label="בטל דילוג"
-                                className="mr-0.5 p-0.5 rounded-full hover:bg-white/70 transition-colors disabled:opacity-50"
-                              >
-                                <RotateCcw className="w-3 h-3" />
-                              </button>
-                            )}
+                          <span className="inline-flex items-center gap-1">
+                            ·<FastForward className="w-3 h-3" />
+                            {nameOf(assignment.skippedBy)} העביר/ה הלאה
                           </span>
                         )}
                         {proofPhotos.length > 0 && (
@@ -1980,22 +2003,18 @@ export default function ChoresApp() {
                             rel="noreferrer"
                             title={photoLabel(proofPhotos.length)}
                             aria-label={photoLabel(proofPhotos.length)}
-                            className="inline-flex items-center gap-1 text-[10px] font-bold text-[#6B5E4C] bg-[#A1C181]/25 px-2 py-0.5 rounded-full hover:bg-[#A1C181]/40 transition-colors"
+                            className="inline-flex items-center gap-1 font-bold text-[#6B5E4C] hover:text-[#3D3732] transition-colors"
                           >
-                            <Camera className="w-3 h-3" />
+                            <Camera className="w-3.5 h-3.5" />
                             {proofPhotos.length > 1 && proofPhotos.length}
                           </a>
                         )}
-                      </div>
-                      <p className="text-xs text-[#A39788] mt-1">
-                        {frequencyLabel(chore.frequency, chore.customDays)}
-                        {chore.category ? ` · ${chore.category}` : ''}
                       </p>
                     </div>
                     {unavailable ? (
                       <div className="flex items-center gap-2 px-3 py-1.5 rounded-full bg-[#F1ECE3] text-[#8C7E6A]">
                         <UserX className="w-4 h-4 flex-shrink-0" />
-                        <span className="text-sm font-bold">אין דייר זמין</span>
+                        <span className="text-sm font-bold">אף אחד לא פנוי</span>
                       </div>
                     ) : assignee && (
                       <div className={`flex flex-col items-end gap-1`}>
@@ -2055,7 +2074,9 @@ export default function ChoresApp() {
 
                   {done ? (
                     <div className="flex flex-col">
-                      <div className="flex items-center justify-between py-3 px-4 bg-[#A1C181]/20 rounded-2xl">
+                      {/* Deeper than the card behind it, which is now green
+                          too - at the old strength the bar disappeared into it. */}
+                      <div className="flex items-center justify-between py-3 px-4 bg-[#A1C181]/30 rounded-2xl">
                         <div className="flex items-center gap-2 text-[#6B5E4C] font-medium">
                           <CheckCircle2 className="w-5 h-5" />
                           בוצע
@@ -2084,10 +2105,12 @@ export default function ChoresApp() {
                       {completionLog && renderReactionBar(completionLog)}
                     </div>
                   ) : cancelled ? (
-                    <div className="flex items-center justify-between gap-2 py-3 px-4 bg-[#F5F1EA] rounded-2xl text-sm font-medium text-[#8C7E6A]">
+                    // White on the settled card tone, because the card itself is
+                    // now #F5F1EA and a panel the same colour is no panel.
+                    <div className="flex items-center justify-between gap-2 py-3 px-4 bg-white/70 rounded-2xl text-sm font-medium text-[#8C7E6A]">
                       <span className="flex items-center gap-2">
                         <X className="w-4 h-4" />
-                        היום נסגר מבלי שהמשימה בוצעה
+                        ויתרנו על זה היום
                       </span>
                       {isAdmin && (
                         <button
@@ -2100,10 +2123,10 @@ export default function ChoresApp() {
                       )}
                     </div>
                   ) : unavailable ? (
-                    <div className="flex items-center justify-center gap-2 py-3 px-4 bg-[#F5F1EA] rounded-2xl text-sm font-medium text-[#8C7E6A]">
+                    <div className="flex items-center justify-center gap-2 py-3 px-4 bg-white/70 rounded-2xl text-sm font-medium text-[#8C7E6A]">
                       <UserX className="w-4 h-4" />
                       {chore.rotation && chore.rotation.length > 0
-                        ? 'אין דייר זמין למשימה ביום זה'
+                        ? 'אף אחד לא פנוי היום'
                         : 'לא הוגדרו משתתפים למשימה זו'}
                     </div>
                   ) : canMarkDone ? (
@@ -2111,9 +2134,9 @@ export default function ChoresApp() {
                     <div className="flex gap-2">
                       <button
                         onClick={() => setPendingDoneChoreId(chore.id)}
-                        className="flex-1 flex items-center justify-center gap-2 py-3.5 bg-[#A1C181] text-white rounded-2xl font-medium shadow-sm hover:bg-[#8eab72] active:scale-[0.98] transition-all"
+                        className="flex-1 flex items-center justify-center gap-2 py-4 bg-[#A1C181] text-white rounded-2xl text-base font-extrabold shadow-md shadow-[#A1C181]/40 hover:bg-[#8eab72] hover:shadow-lg active:scale-[0.98] transition-all"
                       >
-                        <CheckCircle2 className="w-5 h-5" />
+                        <CheckCircle2 className="w-6 h-6" />
                         בוצע
                       </button>
                       {/* A one-off has a single-person rotation, so skipping or
@@ -2125,9 +2148,9 @@ export default function ChoresApp() {
                             onClick={() => handleDeleteChore(chore.id)}
                             title="מחק משימה חד פעמית"
                             aria-label="מחק משימה חד פעמית"
-                            className="flex items-center justify-center px-4 border border-[#E6E0D4] text-rose-400 rounded-2xl font-medium hover:bg-rose-50 active:scale-[0.98] transition-all"
+                            className="flex items-center justify-center px-3.5 border border-[#E6E0D4] text-rose-400 rounded-2xl hover:bg-rose-50 active:scale-[0.98] transition-all"
                           >
-                            <Trash2 className="w-5 h-5" />
+                            <Trash2 className="w-4 h-4" />
                           </button>
                         )
                       ) : (
@@ -2137,10 +2160,9 @@ export default function ChoresApp() {
                             disabled={!isAdmin}
                             title={isAdmin ? 'דלג' : 'רק מנהל הבית יכול לדלג / להחליף תור'}
                             aria-label={isAdmin ? 'דלג' : 'רק מנהל הבית יכול לדלג / להחליף תור'}
-                            className={`flex items-center justify-center gap-2 px-4 border border-[#E6E0D4] text-[#8C7E6A] rounded-2xl font-medium hover:bg-[#F3EFE9] active:scale-[0.98] transition-all ${adminDisabledClass}`}
+                            className={`flex items-center justify-center px-3.5 border border-[#E6E0D4] text-[#8C7E6A] rounded-2xl hover:bg-[#F3EFE9] active:scale-[0.98] transition-all ${adminDisabledClass}`}
                           >
-                            <FastForward className="w-5 h-5" />
-                            דלג
+                            <FastForward className="w-4 h-4" />
                           </button>
                         </AdminHint>
                       )}
@@ -2151,24 +2173,41 @@ export default function ChoresApp() {
                             disabled={!isAdmin}
                             title={isAdmin ? 'החלף תור' : 'רק מנהל הבית יכול לדלג / להחליף תור'}
                             aria-label={isAdmin ? 'החלף תור' : 'רק מנהל הבית יכול לדלג / להחליף תור'}
-                            className={`flex items-center justify-center px-3 border border-[#E6E0D4] text-[#8C7E6A] rounded-2xl font-medium hover:bg-[#F3EFE9] active:scale-[0.98] transition-all ${adminDisabledClass}`}
+                            className={`flex items-center justify-center px-3.5 border border-[#E6E0D4] text-[#8C7E6A] rounded-2xl hover:bg-[#F3EFE9] active:scale-[0.98] transition-all ${adminDisabledClass}`}
                           >
-                            <Repeat className="w-5 h-5" />
+                            <Repeat className="w-4 h-4" />
                           </button>
                         </AdminHint>
                       )}
                     </div>
-                    {/* Skipping only hands the turn on, so a day nobody ever
-                        got to needs its own way out or it stays owed for good. */}
-                    {cell.state === 'overdue' && isAdmin && (
-                      <button
-                        onClick={() => cancelDay(chore.id)}
-                        disabled={actionBusy}
-                        className="flex items-center justify-center gap-2 py-2 text-xs font-bold text-[#8C7E6A] border border-[#E6E0D4] rounded-2xl hover:bg-[#F3EFE9] active:scale-[0.98] transition-all disabled:opacity-50"
-                      >
-                        <X className="w-3.5 h-3.5" />
-                        סגור את היום ללא ביצוע
-                      </button>
+                    {/* The two corrections, both admin-only and both worth a
+                        finger-sized target. Skipping hands the turn on but
+                        leaves the day owed, so a day nobody ever got to needs
+                        its own way out; undoing a skip was a 12px icon tucked
+                        inside a badge, which is not a button anyone can hit. */}
+                    {isAdmin && (assignment.skippedBy || cell.state === 'overdue') && (
+                      <div className="flex gap-2">
+                        {assignment.skippedBy && (
+                          <button
+                            onClick={() => handleUndoSkip(chore.id)}
+                            disabled={actionBusy}
+                            className="flex-1 flex items-center justify-center gap-2 py-3 text-xs font-bold text-[#8C7E6A] border border-[#E6E0D4] rounded-2xl hover:bg-[#F3EFE9] active:scale-[0.98] transition-all disabled:opacity-50"
+                          >
+                            <RotateCcw className="w-4 h-4" />
+                            החזר את התור
+                          </button>
+                        )}
+                        {cell.state === 'overdue' && (
+                          <button
+                            onClick={() => cancelDay(chore.id)}
+                            disabled={actionBusy}
+                            className="flex-1 flex items-center justify-center gap-2 py-3 text-xs font-bold text-[#8C7E6A] border border-[#E6E0D4] rounded-2xl hover:bg-[#F3EFE9] active:scale-[0.98] transition-all disabled:opacity-50"
+                          >
+                            <X className="w-4 h-4" />
+                            לא צריך היום
+                          </button>
+                        )}
+                      </div>
                     )}
                     </div>
                   ) : (
