@@ -5,7 +5,9 @@ Simple household task app — daily and weekly chore sharing without the argumen
 Built with **Next.js**, **Firebase**, and **Tailwind CSS**.
 
 What the app does and why it is built this way is in
-[HOW-IT-WORKS.md](HOW-IT-WORKS.md).
+[HOW-IT-WORKS.md](HOW-IT-WORKS.md). How the code is put together — architecture,
+patterns, workflows and known limitations — is in
+[ARCHITECTURE.md](ARCHITECTURE.md).
 
 ## Run locally
 
