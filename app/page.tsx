@@ -81,7 +81,7 @@ import {
   statePresentation,
   weekAround
 } from '../lib/schedule-view';
-import type { DropKind, ScheduleFilters } from '../lib/schedule-view';
+import type { CellState, DropKind, ScheduleFilters } from '../lib/schedule-view';
 import { MOVED_ICON, STATE_ICONS, TRADED_ICON } from '../components/state-icons';
 import { householdDisplayName, profileStorageKey } from '../lib/household-utils';
 import { describeAuthError } from '../lib/auth-errors';
@@ -210,53 +210,87 @@ const noopSubscribe = () => () => {};
  */
 function DayHeading({
   summary,
-  isToday,
+  onTrack,
+  isWeek,
   dateLabel,
   onBackToToday
 }: {
-  summary: { owed: number; settled: number; mine: number };
-  isToday: boolean;
+  summary: {
+    owed: number;
+    settled: number;
+    /** The same two counts, narrowed to the acting resident. */
+    mine: { owed: number; settled: number };
+  };
+  /** The view is showing the present: today, or the week containing it. */
+  onTrack: boolean;
+  isWeek: boolean;
+  /** Already worded by the caller, because a day and a week read differently. */
   dateLabel: string;
   onBackToToday: () => void;
 }) {
   const { owed, settled, mine } = summary;
-  const headline =
-    owed === 0
-      ? settled > 0
+  const houseScope = isWeek ? 'בשבוע' : 'בבית';
+
+  // Hebrew counts one thing differently from many, and "יש לך 1 משימות" is the
+  // kind of wrong that makes an app feel machine-written.
+  const tasks = (n: number) => (n === 1 ? 'משימה אחת' : `${n} משימות`);
+
+  // The headline and the count have to describe the same set. "יש לך 1 משימות"
+  // beside a bare "0/4" invited reading the 4 as yours, when it was the whole
+  // household's. So when the headline is about you, the count is too.
+  const personal = mine.owed > 0;
+  const shown = personal
+    ? { settled: mine.settled, owed: mine.owed, scope: 'שלך' }
+    : { settled, owed, scope: houseScope };
+  const total = shown.settled + shown.owed;
+
+  // One fact, and it is whichever fact the reader most needs. What you owe
+  // beats what the house owes, and both beat a total.
+  const headline = personal
+    ? `יש לך ${tasks(mine.owed)}`
+    : owed > 0
+      ? `${tasks(owed)} ${houseScope}`
+      : settled > 0
         ? 'הכל בוצע'
-        : 'אין מה לעשות'
-      : mine > 0
-        ? `${mine} משימות שלך`
-        : `${owed} משימות פתוחות`;
+        : 'אין משימות';
+
+  const progress = `בוצעו ${shown.settled} מתוך ${total} ${shown.scope}`;
+  const SettledIcon = STATE_ICONS[statePresentation('done').glyph];
 
   return (
     <div
-      className={`sticky top-0 z-10 -mx-6 px-6 py-3 border-b backdrop-blur-xl ${
-        isToday ? 'bg-page/90 border-line' : 'bg-warn/15 border-warn/40'
+      // `top-14` is the app header's declared height: this sits directly under
+      // it rather than sliding beneath it. Full-bleed via `-mx-6`, so the tint
+      // that warns about the wrong day reaches both edges.
+      className={`sticky top-14 z-10 -mx-6 px-6 py-3 border-b backdrop-blur-xl ${
+        onTrack ? 'bg-page/95 border-line' : 'bg-warn/25 border-warn/50'
       }`}
     >
       <div className="flex items-center justify-between gap-3">
         <div className="min-w-0">
           <p className="text-base font-extrabold text-ink truncate">{headline}</p>
           {/* The date is the safety-critical half of this bar, so it is never
-              implied. "היום" is only ever shown when it is true. */}
-          <p className="text-xs font-bold text-ink-muted truncate">
-            {isToday ? `היום · ${dateLabel}` : dateLabel}
-          </p>
+              implied: "היום" appears only when it is true. */}
+          <p className="text-xs font-bold text-ink-muted truncate">{dateLabel}</p>
         </div>
-        {owed > 0 && (
-          <span className="flex-shrink-0 text-xs font-bold text-ink-mid tabular-nums">
-            {settled}/{settled + owed}
+        {total > 0 && (
+          <span
+            title={progress}
+            aria-label={progress}
+            className="flex-shrink-0 flex items-center gap-1 text-xs font-bold text-ink-mid tabular-nums"
+          >
+            <SettledIcon className="w-3.5 h-3.5 text-settled" strokeWidth={3} />
+            {shown.settled}/{total}
           </span>
         )}
         {/* Only a way back, never a way to a day nobody asked for. */}
-        {!isToday && (
+        {!onTrack && (
           <button
             type="button"
             onClick={onBackToToday}
             className="flex-shrink-0 px-3 py-2 rounded-2xl bg-card border border-warn/50 text-xs font-bold text-warn-ink hover:bg-warn/10 transition-colors"
           >
-            חזרה להיום
+            {isWeek ? 'חזרה לשבוע הזה' : 'חזרה להיום'}
           </button>
         )}
       </div>
@@ -658,6 +692,35 @@ export default function ChoresApp() {
       weekRows.flatMap(row => row.cells.flatMap(c => (c.person ? [c.person.id] : [])))
     );
 
+    // What is on screen, in one line, counted from the rows that were actually
+    // built. Counting from `dayEntries` alone made the heading claim there was
+    // nothing to do whenever the week was showing, because the day rows are
+    // deliberately not built then.
+    //
+    // Read through `statePresentation` so "still owed" means here what it means
+    // on the cards: a skipped day counts, an unavailable one does not, because
+    // nobody owes it.
+    const summary = { owed: 0, settled: 0, mine: { owed: 0, settled: 0 } };
+    const tally = (state: CellState, userId: string | null) => {
+      const p = statePresentation(state);
+      const isMine = !!userId && userId === currentUserId;
+      if (p.owed) {
+        summary.owed += 1;
+        if (isMine) summary.mine.owed += 1;
+      }
+      if (p.settled) {
+        summary.settled += 1;
+        if (isMine) summary.mine.settled += 1;
+      }
+    };
+    if (showWeek) {
+      for (const row of weekRows) {
+        for (const cell of row.cells) tally(cell.state, cell.person?.id ?? null);
+      }
+    } else {
+      for (const { cell } of dayEntries) tally(cell.state, cell.userId);
+    }
+
     // An empty view means one of two opposite things, and each view used to
     // assume a different one: the day list called the house clean when the
     // default "my tasks" filter was simply hiding everyone else's turn, and the
@@ -672,6 +735,7 @@ export default function ChoresApp() {
       weekDays,
       dayEntries,
       weekRows,
+      summary,
       weekLegend: users.filter(u => weekLegendIds.has(u.id)).map(toWeekPerson),
       dayHasAnySchedule: dayEntries.length > 0 || anyScheduled([selectedDate]),
       weekHasAnySchedule: weekRows.length > 0 || anyScheduled(weekDays)
@@ -1917,26 +1981,14 @@ export default function ChoresApp() {
       weekDays,
       dayEntries,
       weekRows,
+      summary,
       weekLegend,
       dayHasAnySchedule,
       weekHasAnySchedule
     } = schedule;
 
-    // What the day amounts to, in one line. Counted from the rendered rows
-    // rather than from a second pass, and through `statePresentation` so
-    // "still owed" means the same thing here as it does on the cards: a
-    // skipped day counts, an unavailable one does not, because nobody owes it.
-    const daySummary = dayEntries.reduce(
-      (acc, { cell }) => {
-        const p = statePresentation(cell.state);
-        if (p.owed) acc.owed += 1;
-        if (p.settled) acc.settled += 1;
-        if (p.owed && cell.userId === currentUserId) acc.mine += 1;
-        return acc;
-      },
-      { owed: 0, settled: 0, mine: 0 }
-    );
-
+    const isWeekView = tasksView === 'week';
+    const weekHasToday = weekDays.some(d => dayKey(d) === todayKey);
     const weekRangeLabel = `${weekDays[0].toLocaleDateString('he-IL', { day: '2-digit', month: '2-digit' })} – ${weekDays[6].toLocaleDateString('he-IL', { day: '2-digit', month: '2-digit' })}`;
 
     // Rearranging is off while a person filter is on. The grid renders another
@@ -1956,13 +2008,23 @@ export default function ChoresApp() {
             used to be below the fold behind four rows of filters. Derived from
             the same rows the list renders, so it cannot contradict them. */}
         <DayHeading
-          summary={daySummary}
-          isToday={isToday}
-          dateLabel={selectedDate.toLocaleDateString('he-IL', {
-            weekday: 'long',
-            day: 'numeric',
-            month: 'long'
-          })}
+          summary={summary}
+          isWeek={isWeekView}
+          // A week is on track when it contains today, a day when it is today.
+          // Paging to another week is the same mistake as paging to another
+          // day, and worth the same warning.
+          onTrack={isWeekView ? weekHasToday : isToday}
+          dateLabel={
+            isWeekView
+              ? weekHasToday
+                ? `השבוע · ${weekRangeLabel}`
+                : weekRangeLabel
+              : `${isToday ? 'היום · ' : ''}${selectedDate.toLocaleDateString('he-IL', {
+                  weekday: 'long',
+                  day: 'numeric',
+                  month: 'long'
+                })}`
+          }
           onBackToToday={() => setSelectedDate(today)}
         />
 
@@ -3555,14 +3617,24 @@ export default function ChoresApp() {
         }}
       />
       {/* One line: the active home is the only thing here that changes, and
-          switching homes lives in settings rather than on every screen. */}
-      <header className="sticky top-0 z-10 bg-[#FAF9F6]/80 backdrop-blur-xl border-b border-[#E6E0D4] px-6 py-3 flex items-center justify-center">
-        <h1 className="text-lg font-extrabold text-[#3D3732] tracking-tight truncate max-w-full">
+          switching homes lives in settings rather than on every screen.
+
+          A declared height, because the day heading inside the tasks tab has
+          to stick directly beneath this one and needs to know how far down
+          that is. `z-30` keeps this above it when the two meet. */}
+      <header className="sticky top-0 z-30 h-14 bg-page/80 backdrop-blur-xl border-b border-line px-6 flex items-center justify-center">
+        <h1 className="text-lg font-extrabold text-ink tracking-tight truncate max-w-full">
           {household ? householdDisplayName(household) : 'תורנויות הבית'}
         </h1>
       </header>
 
-      <main className="flex-1 px-6 pt-6 overflow-y-auto">
+      {/* No `overflow-y-auto` here. This is inside a `min-h-screen` column, so
+          it is never height-bounded and never actually scrolled - the document
+          does the scrolling. All the overflow did was make this the containing
+          block for any `sticky` descendant, which silently broke the tasks
+          tab's sticky date heading: it had a scroll container that never
+          scrolled, so it scrolled away with the page. */}
+      <main className="flex-1 px-6 pt-6">
         {activeTab === 'tasks' && renderTasks()}
         {activeTab === 'history' && renderHistory()}
         {activeTab === 'settings' && renderSettings()}
