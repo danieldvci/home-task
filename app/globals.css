@@ -1,1 +1,85 @@
 @import "tailwindcss";
+
+/*
+ * The palette, named by role.
+ *
+ * These colours were already consistent and entirely undocumented: 39 distinct
+ * hex values written inline as Tailwind arbitrary values, plus a handful of
+ * Tailwind's own named colours mixed in. That is how the week grid's legend came
+ * to describe an overdue day as `rose-500` while the cell it explained was
+ * #B9553D — nothing tied the key to the map.
+ *
+ * Named by role rather than by colour, so a change of mind about the hue is one
+ * edit here and so a reader can tell what a colour is *for*. `bg-owed/10` says
+ * what `bg-[#B9553D]/10` cannot.
+ *
+ * The state block is the load-bearing part. Whatever renders a chore-and-day
+ * pair - the day list, the week grid, the grid legend, the activity log's action
+ * pills - resolves its appearance through `statePresentation` in
+ * lib/schedule-view.ts, which is the only thing that should reach for these.
+ */
+@theme {
+  /* --- Surfaces, lightest to deepest ------------------------------------- */
+  --color-page: #faf9f6;
+  --color-card: #ffffff;
+  /* A settled or unreachable day: present, not asking for anything. */
+  --color-sunken: #f5f1ea;
+  --color-subtle: #f3efe9;
+  /* Toggle tracks and anything recessed into a card. */
+  --color-inset: #f1ece3;
+  --color-line: #e6e0d4;
+  --color-line-strong: #d8d1c4;
+
+  /* --- Ink, strongest to faintest ---------------------------------------- */
+  --color-ink: #3d3732;
+  --color-ink-body: #4a443f;
+  --color-ink-mid: #6b5e4c;
+  --color-ink-muted: #8c7e6a;
+  --color-ink-faint: #a39788;
+  --color-ink-ghost: #c4bbac;
+
+  /* --- What a day is ------------------------------------------------------
+   * One colour per state, and never colour alone: `statePresentation` pairs
+   * each of these with a glyph, because this is a household app used by
+   * children and red-against-green is the commonest colour-blindness axis.
+   */
+
+  /* done - settled, nothing owed */
+  --color-settled: #a1c181;
+  --color-settled-hover: #8eab72;
+  --color-settled-ink: #5f7a45;
+  /* overdue - owed, and the day has gone */
+  --color-owed: #b9553d;
+  /* skipped - the turn moved on and the day is still owed */
+  --color-handed-on: #3d5a80;
+  /* moved or traded - the day is somewhere else now */
+  --color-relocated: #7c9cbf;
+  /* cancelled - written off, nobody owes it */
+  --color-closed: #a39788;
+  /* unavailable - owed by nobody, which is the app's problem not the house's */
+  --color-idle: #c4bbac;
+
+  /* --- Accents ----------------------------------------------------------- */
+  --color-accent: #3d5a80;
+  --color-accent-deep: #2b4261;
+  --color-accent-soft: #7c9cbf;
+  --color-warn: #e9c46a;
+  --color-warn-ink: #8a6d1f;
+  --color-note: #7b6ca8;
+  --color-note-ink: #5c4f86;
+  /* Destructive actions and failures. The same family as `owed` on purpose:
+   * this palette says "something is wrong here" in one hue, and the rose-*
+   * utilities scattered through the components were a second opinion. */
+  --color-danger: #b9553d;
+  --color-danger-soft: #e07a5f;
+  --color-avatar-empty: #d4cbbf;
+}
+
+/*
+ * A tap target small enough to miss is not a tap target. 44px is the figure
+ * both platform guidelines land on, and the week grid's cells were 28px.
+ */
+@utility tap-target {
+  min-width: 2.75rem;
+  min-height: 2.75rem;
+}
