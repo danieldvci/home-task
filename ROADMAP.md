@@ -77,6 +77,27 @@ Principles first, because the concrete proposals are only worth keeping while
 the reasoning under them holds. Anything already tracked as a bug stays in
 `DEFECTS.md`; this section does not restate it.
 
+### What has landed
+
+On `redesign/v0.2`. The reasoning for each now lives with the code it explains,
+which is the only place it stays true, so it is not repeated here:
+
+| Landed | Where the reasoning is |
+|---|---|
+| One schedule pass per render, memoised on `dayKey(today)`; residents indexed rather than searched | the `schedule` memo in `app/page.tsx`, `Residents` in `lib/rotation.ts` |
+| A cost budget that counts lookups instead of timing them | the last block of `scripts/schedule-view.test.ts` |
+| The palette named by role | `@theme` in `app/globals.css` |
+| `statePresentation` — one table deciding a state's surface, badge, dot, glyph and word, with the week grid's legend generated from it | `lib/schedule-view.ts` |
+| A skip drawn as a modifier on a state rather than a state | `isHandedOn`, same file |
+| A summary line, and the acted-on date pinned and named | `DayHeading` in `app/page.tsx` |
+| The selected day following today unless picked, so an overnight tab cannot backdate a completion | `pinnedDate`, same file |
+| A refusal that answers on tap | `AdminHint`, same file |
+| 44px grid cells, legend above the grid, both `dropTargets` defects | `components/WeekOverview.tsx`, `DEFECTS.md` |
+
+Still open below: the single filter bar, demoting skip and swap out of the card's
+action row, inverting the confirmation policy, the member "ask" affordances,
+splitting `app/page.tsx`, and all of History and Settings.
+
 ### The test every change here has to pass
 
 This is a chore list for a family, opened for a few seconds while someone is
@@ -448,10 +469,11 @@ The second budget is the render, and here the redesign is genuinely at risk,
 because it adds readers to a computation that is already unmemoised.
 
 `app/page.tsx` contains no `useMemo`, `useCallback` or `memo`. `renderTasks`
-calls `buildScheduleRows` four times on every render: the day rows, the week
-rows, and then both again with `ALL_TASKS` purely to decide whether an empty
-list means "nothing scheduled" or "nothing matches your filter". Two of those
-four are for the view that is not on screen. Each cell then resolves through
+calls `buildScheduleRows` twice on every render, for the day rows and the week
+rows, and a third and fourth time with `ALL_TASKS` to decide whether an empty
+list means "nothing scheduled" or "nothing matches your filter" — those two are
+`||` short-circuited, so they only run when a view is already empty. One of the
+first two is always for the view that is not on screen. Each cell resolves through
 `projectAssigneeIndex`, which walks the calendar one day at a time from today to
 the day in question, and every occurrence it passes calls
 `getActiveAssigneeIndex`, which does a `users.find` per rotation slot. On top of
@@ -472,9 +494,9 @@ before the visual work rather than after.
 - **Do not build the view that is not showing.** The day rows and the week rows
   are both built regardless of `tasksView`. Halving this is a one-line change.
 - **Stop asking the question twice.** The two `ALL_TASKS` passes exist only to
-  choose an empty-state sentence. Derive that from the unfiltered pass the
-  view already needs, or answer it with `chores.some(choreOccursOnDate)`, which
-  is a fraction of the cost.
+  choose an empty-state sentence, and resolve an assignee for every cell to do
+  it. Whether anything is scheduled needs no assignee:
+  `chores.some(choreOccursOnDate)` answers it for a fraction of the cost.
 - **Memoise on the day, not on the `Date`.** `today` is a fresh object every
   render, so a `useMemo` keyed on it would never hit and the minute tick would
   defeat the whole exercise. Key on `dayKey(today)` and the tick becomes free
@@ -487,7 +509,9 @@ before the visual work rather than after.
 - **Let the state map be a lookup, not a constructor.** `statePresentation`
   runs per cell. It should select from a frozen record keyed by state and
   return plain class strings, not allocate a fresh object and compose classes
-  per cell. `CARD_SURFACE` already has the right shape; keep it.
+  per cell. `CARD_SURFACE` already has the right shape; keep it. A skip has to
+  ride alongside a state rather than inside it, or the lookup becomes a
+  constructor again to carry it.
 
 Two things to add rather than optimise. The day list has no skeleton — the whole
 app shows one spinner until Firestore answers — so the cheapest perceived-speed
