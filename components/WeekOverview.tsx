@@ -1,20 +1,12 @@
 'use client';
 
 import React from 'react';
-import {
-  ArrowRightLeft,
-  Check,
-  ChevronLeft,
-  ChevronRight,
-  CornerDownRight,
-  Loader2,
-  Plus,
-  Users,
-  UserX,
-  X
-} from 'lucide-react';
+import { ChevronLeft, ChevronRight, Loader2, Plus, Users } from 'lucide-react';
+import type { LucideIcon } from 'lucide-react';
 import { motion } from 'motion/react';
 import { Avatar } from './Avatar';
+import { MOVED_ICON, STATE_ICONS, TRADED_ICON } from './state-icons';
+import { HANDED_ON, RELOCATED, statePresentation } from '../lib/schedule-view';
 import type { CellState, DropKind, DropTarget } from '../lib/schedule-view';
 
 export type WeekPerson = {
@@ -33,6 +25,9 @@ export type WeekCell = {
   movedFrom?: string | null;
   /** Its resident was chosen by a move or a swap rather than by the queue. */
   rearranged?: boolean;
+  /** The turn was passed on and the day is still owed. Not a `CellState`,
+   *  because a skip settles nothing - see `isHandedOn` in lib/schedule-view. */
+  handedOn?: boolean;
 };
 
 export type WeekRow = {
@@ -44,14 +39,19 @@ export type WeekRow = {
 
 const DAY_LETTERS = ['א׳', 'ב׳', 'ג׳', 'ד׳', 'ה׳', 'ו׳', 'ש׳'];
 
-const STATE_LABEL: Record<CellState, string> = {
-  none: '',
-  open: 'ממתין',
-  overdue: 'באיחור',
-  done: 'בוצע',
-  cancelled: 'בוטל',
-  unavailable: 'אף אחד לא פנוי'
-};
+// The states this grid draws a marker for. `open` is a bare face, because a
+// turn that has not come round yet needs no decoration, and `none` is a dot.
+const MARKED_STATES: CellState[] = ['done', 'overdue', 'cancelled'];
+
+// "Nothing owed" wears the same tick as a finished day.
+const SettledIcon = STATE_ICONS[statePresentation('done').glyph];
+
+// The key, built from the same table the cells are, so it cannot drift from
+// what it explains. It used to be hand-written: the swatch for an overdue day
+// was `bg-rose-500` while the cell it described was #B9553D, and it called that
+// day `לא בוצע` where the grid's own tooltip called it `באיחור` and the day list
+// called it `באיחור` too.
+const LEGEND_STATES: CellState[] = ['done', 'overdue', 'cancelled', 'unavailable'];
 
 // Long enough not to fire while the grid is being panned sideways, short enough
 // that it does not feel like the tap was missed.
@@ -133,11 +133,43 @@ type WeekOverviewProps = {
   onClearPersonFilter?: () => void;
 };
 
+/** A state marker, at the size the grid can actually spare. */
+function Marker({
+  className,
+  icon: Icon,
+  corner,
+  title
+}: {
+  className: string;
+  icon: LucideIcon;
+  corner: 'bottom' | 'top';
+  title?: string;
+}) {
+  return (
+    <span
+      title={title}
+      className={`absolute -left-0.5 w-3.5 h-3.5 rounded-full flex items-center justify-center ring-1 ring-white ${
+        corner === 'bottom' ? '-bottom-0.5' : '-top-0.5'
+      } ${className}`}
+    >
+      <Icon className="w-2 h-2 text-white" strokeWidth={4} />
+    </span>
+  );
+}
+
 function CellContent({ cell }: { cell: WeekCell }) {
+  const presentation = statePresentation(cell.state);
+
   if (cell.state === 'unavailable') {
-    return <UserX className="w-4 h-4 mx-auto text-[#C4BBAC]" />;
+    const Icon = STATE_ICONS[presentation.glyph];
+    return <Icon className="w-4 h-4 mx-auto text-idle" />;
   }
-  if (!cell.person) return <span className="text-[#D8D1C4] text-sm font-bold">·</span>;
+  if (!cell.person) return <span className="text-line-strong text-sm font-bold">·</span>;
+
+  const marked = MARKED_STATES.includes(cell.state);
+  const StateIcon = STATE_ICONS[presentation.glyph];
+  const HandedOnIcon = STATE_ICONS[HANDED_ON.glyph];
+  const RelocationIcon = cell.movedFrom ? MOVED_ICON : TRADED_ICON;
 
   return (
     <span className="relative inline-block">
@@ -153,35 +185,35 @@ function CellContent({ cell }: { cell: WeekCell }) {
           cell.state === 'cancelled' ? 'opacity-30 grayscale' : ''
         }
       />
-      {cell.state === 'done' && (
-        <span className="absolute -bottom-0.5 -left-0.5 w-3 h-3 rounded-full bg-[#A1C181] flex items-center justify-center">
-          <Check className="w-2 h-2 text-white" strokeWidth={4} />
-        </span>
+      {/* One mark per state, from the same table the day list and the legend
+          read. Overdue used to carry a ring round the face as well as a badge,
+          which said the same thing twice. */}
+      {marked && (
+        <Marker
+          className={presentation.dot}
+          icon={StateIcon}
+          corner="bottom"
+          title={presentation.label}
+        />
       )}
-      {/* One mark per state, in one place. Overdue used to carry a ring round
-          the face as well as this badge, which said the same thing twice and
-          left overdue the only state shouting across the grid. */}
-      {cell.state === 'overdue' && (
-        <span className="absolute -bottom-0.5 -left-0.5 w-3 h-3 rounded-full bg-[#B9553D] flex items-center justify-center">
-          <span className="text-white text-[8px] font-black leading-none">!</span>
-        </span>
-      )}
-      {cell.state === 'cancelled' && (
-        <span className="absolute -bottom-0.5 -left-0.5 w-3 h-3 rounded-full bg-[#A39788] flex items-center justify-center">
-          <X className="w-2 h-2 text-white" strokeWidth={4} />
-        </span>
+      {/* A skip was invisible here. It hands the turn on and leaves the day
+          owed, so the grid showed a plain face on somebody else's name with
+          nothing to say the queue had moved. */}
+      {cell.handedOn && !marked && (
+        <Marker
+          className={HANDED_ON.dot}
+          icon={HandedOnIcon}
+          corner="bottom"
+          title={HANDED_ON.label}
+        />
       )}
       {cell.rearranged && cell.state !== 'cancelled' && (
-        <span
-          className="absolute -top-0.5 -left-0.5 w-3 h-3 rounded-full bg-[#7C9CBF] flex items-center justify-center"
-          title={cell.movedFrom ? `הועבר מ-${cell.movedFrom}` : 'הוחלף'}
-        >
-          {cell.movedFrom ? (
-            <CornerDownRight className="w-2 h-2 text-white" strokeWidth={4} />
-          ) : (
-            <ArrowRightLeft className="w-2 h-2 text-white" strokeWidth={4} />
-          )}
-        </span>
+        <Marker
+          className={RELOCATED.dot}
+          icon={RelocationIcon}
+          corner="top"
+          title={cell.movedFrom ? `${RELOCATED.moved} מ-${cell.movedFrom}` : RELOCATED.traded}
+        />
       )}
     </span>
   );
@@ -527,17 +559,17 @@ export function WeekOverview({
       <div className="flex flex-col gap-3 pb-24">
         {nav}
         <div className="flex flex-col items-center justify-center py-16 text-center">
-          <div className="w-20 h-20 bg-[#F5F1EA] rounded-full flex items-center justify-center mb-4">
+          <div className="w-20 h-20 bg-sunken rounded-full flex items-center justify-center mb-4">
             {emptyReason === 'filtered' ? (
               <span className="text-2xl">🗓️</span>
             ) : (
-              <Check className="w-10 h-10 text-[#A1C181]" />
+              <SettledIcon className="w-10 h-10 text-settled" />
             )}
           </div>
-          <h3 className="text-xl font-bold text-[#3D3732] mb-1">
+          <h3 className="text-xl font-bold text-ink mb-1">
             {emptyReason === 'filtered' ? 'אין משימות שמתאימות לסינון' : 'אין תורנויות לשבוע זה'}
           </h3>
-          <p className="text-[#8C7E6A]">
+          <p className="text-ink-muted">
             {emptyReason === 'filtered' ? 'נסה לשנות את הסינון.' : 'הכל נקי ומסודר.'}
           </p>
         </div>
@@ -650,7 +682,12 @@ export function WeekOverview({
                     const day = days[i];
                     const isSelected = day.toDateString() === selectedStr;
                     const dayLabel = `${DAY_LETTERS[day.getDay()]} ${day.getDate()}`;
-                    const title = [cell.person?.name, STATE_LABEL[cell.state], dayLabel]
+                    const title = [
+                      cell.person?.name,
+                      cell.state === 'none' ? null : statePresentation(cell.state).label,
+                      cell.handedOn ? HANDED_ON.label : null,
+                      dayLabel
+                    ]
                       .filter(Boolean)
                       .join(' · ');
                     const dropKind = isPickedRow
@@ -702,33 +739,44 @@ export function WeekOverview({
         ))}
       </div>
 
-      <div className="flex flex-wrap items-center gap-x-4 gap-y-2 px-1 text-[11px] text-[#8C7E6A]">
+      {/* Generated from `statePresentation`, so the key and the map it explains
+          are the same data. Hand-written, it drifted: this described an overdue
+          day with a rose-500 swatch and the word `לא בוצע`, where the cell was
+          #B9553D and every other view called it `באיחור`. */}
+      <div className="flex flex-wrap items-center gap-x-4 gap-y-2 px-1 text-[11px] text-ink-muted">
+        {LEGEND_STATES.map(state => {
+          const p = statePresentation(state);
+          const Icon = STATE_ICONS[p.glyph];
+          return (
+            <span key={state} className="flex items-center gap-1.5">
+              <span
+                className={`w-3.5 h-3.5 rounded-full flex items-center justify-center ${p.dot}`}
+              >
+                <Icon className="w-2 h-2 text-white" strokeWidth={4} />
+              </span>
+              {p.label}
+            </span>
+          );
+        })}
         <span className="flex items-center gap-1.5">
-          <span className="w-3 h-3 rounded-full bg-[#A1C181] flex items-center justify-center">
-            <Check className="w-2 h-2 text-white" strokeWidth={4} />
+          <span
+            className={`w-3.5 h-3.5 rounded-full flex items-center justify-center ${HANDED_ON.dot}`}
+          >
+            {React.createElement(STATE_ICONS[HANDED_ON.glyph], {
+              className: 'w-2 h-2 text-white',
+              strokeWidth: 4
+            })}
           </span>
-          בוצע
-        </span>
-        <span className="flex items-center gap-1.5">
-          <span className="w-3 h-3 rounded-full bg-rose-500 border border-white" />
-          לא בוצע
-        </span>
-        <span className="flex items-center gap-1.5">
-          <span className="w-3 h-3 rounded-full bg-[#A39788] flex items-center justify-center">
-            <X className="w-2 h-2 text-white" strokeWidth={4} />
-          </span>
-          נסגר
-        </span>
-        <span className="flex items-center gap-1.5">
-          <UserX className="w-3.5 h-3.5 text-[#C4BBAC]" />
-          אין דייר זמין
+          {HANDED_ON.label}
         </span>
         {canRearrange && (
           <span className="flex items-center gap-1.5">
-            <span className="w-3 h-3 rounded-full bg-[#7C9CBF] flex items-center justify-center">
-              <CornerDownRight className="w-2 h-2 text-white" strokeWidth={4} />
+            <span
+              className={`w-3.5 h-3.5 rounded-full flex items-center justify-center ${RELOCATED.dot}`}
+            >
+              <MOVED_ICON className="w-2 h-2 text-white" strokeWidth={4} />
             </span>
-            הועבר או הוחלף
+            {`${RELOCATED.moved} או ${RELOCATED.traded}`}
           </span>
         )}
       </div>

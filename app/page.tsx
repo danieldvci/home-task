@@ -68,15 +68,21 @@ import {
 } from '../lib/activity-stats';
 import {
   DEFAULT_CATEGORY,
+  HANDED_ON,
+  RELOCATED,
   buildScheduleRows,
   carryOverLabel,
   dayStripDays,
   dropTargets,
+  isHandedOn,
   missedOccurrences,
+  relativeDayLabel,
   shiftDays,
+  statePresentation,
   weekAround
 } from '../lib/schedule-view';
-import type { CellState, DropKind, ScheduleFilters } from '../lib/schedule-view';
+import type { DropKind, ScheduleFilters } from '../lib/schedule-view';
+import { MOVED_ICON, STATE_ICONS, TRADED_ICON } from '../components/state-icons';
 import { householdDisplayName, profileStorageKey } from '../lib/household-utils';
 import { describeAuthError } from '../lib/auth-errors';
 import { describeChoreChanges, frequencyLabel, joinDetails, clampDetails } from '../lib/activity';
@@ -88,6 +94,7 @@ import {
   completionMarkers,
   currentIndexAfterUndo,
   dayKey,
+  dayKeyToDate,
   getChoreHealth,
   getNextActiveIndex,
   isUserAbsentNow,
@@ -110,22 +117,11 @@ import {
 } from '../lib/notifications';
 import { BellRing, BellOff } from 'lucide-react';
 
-/**
- * One card surface per state, so the day list can be read by colour before a
- * word of it is read.
- *
- * Only `open` keeps the white, lifted card: it is the one thing asking to be
- * acted on. Everything settled or blocked drops back to the page tone so it
- * stops competing, and `overdue` is the only state allowed to be loud.
- */
-const CARD_SURFACE: Record<CellState, string> = {
-  none: 'bg-white border-[#E6E0D4] shadow-sm',
-  open: 'bg-white border-[#E6E0D4] shadow-sm',
-  overdue: 'bg-[#B9553D]/[0.07] border-[#B9553D]/30',
-  done: 'bg-[#A1C181]/10 border-[#A1C181]/40',
-  cancelled: 'bg-[#F5F1EA] border-[#E6E0D4]',
-  unavailable: 'bg-[#F5F1EA] border-[#E6E0D4]'
-};
+// A card's surface, its badge and its words all come from `statePresentation`
+// in lib/schedule-view.ts, which the week grid and the grid's legend read too.
+// This used to be a local table that only the day list could see, which is how
+// the two views ended up with different names and different colours for the
+// same state.
 
 // --- Types ---
 type UserType = {
@@ -535,7 +531,8 @@ export default function ChoresApp() {
               state: cell.state,
               person: u ? toWeekPerson(u) : null,
               movedFrom: cell.movedFrom,
-              rearranged: cell.rearranged
+              rearranged: cell.rearranged,
+              handedOn: isHandedOn(cell)
             };
           })
         }));
@@ -2009,13 +2006,34 @@ export default function ChoresApp() {
                 ? logs.find(l => l.id === assignment.logId)
                 : undefined;
               const proofPhotos = completionLog ? logPhotos(completionLog) : [];
+
+              // Appearance and wording, from the one table every view reads.
+              const presentation = statePresentation(cell.state);
+              const StateIcon = STATE_ICONS[presentation.glyph];
+              const HandedOnIcon = STATE_ICONS[HANDED_ON.glyph];
+              const handedOn = isHandedOn(cell);
+              // `open` and `done` carry their state in the card itself - a
+              // lifted white card is a task to do, and the green bar below the
+              // title already says finished - so a pill on either is noise.
+              const stateBadge =
+                cell.state === 'open' || cell.state === 'done' ? null : presentation;
+              // A moved day and a traded day are told apart by whether the
+              // occurrence came from somewhere: `movedFrom` names the day it
+              // left, a trade only swaps who owes it.
+              const relocation = !cell.rearranged
+                ? null
+                : cell.movedFrom
+                  ? `${RELOCATED.moved} ${relativeDayLabel(dayKeyToDate(cell.movedFrom), today)}`
+                  : RELOCATED.traded;
+              const RelocationIcon = cell.movedFrom ? MOVED_ICON : TRADED_ICON;
+
               return (
                 <motion.div
                   layout
                   initial={{ opacity: 0, y: 10 }}
                   animate={{ opacity: 1, y: 0 }}
                   key={chore.id}
-                  className={`p-5 rounded-3xl border transition-all ${CARD_SURFACE[cell.state]}`}
+                  className={`p-5 rounded-3xl border transition-all ${presentation.surface}`}
                 >
                   <div className="flex justify-between items-start mb-4">
                     {/* Yields width to the assignee chip: the badges below are
@@ -2023,21 +2041,45 @@ export default function ChoresApp() {
                         title beats a cropped face. */}
                     <div className="min-w-0 flex-1">
                       <div className="flex items-center gap-2 flex-wrap">
-                        <h3 className={`text-lg font-bold ${done ? 'text-[#6B5E4C]' : 'text-[#3D3732]'}`}>
+                        <h3 className={`text-lg font-bold ${done ? 'text-ink-mid' : 'text-ink'}`}>
                           {chore.name}
                         </h3>
-                        {/* At most one pill, and only where the card surface on
-                            its own could be misread. Done needs none: the green
-                            bar below the title already says it. */}
-                        {cell.state === 'overdue' ? (
-                          <span className="inline-flex items-center gap-1 text-[10px] font-bold text-[#B9553D] bg-[#B9553D]/10 px-2 py-0.5 rounded-full">
-                            <AlertTriangle className="w-3 h-3" /> באיחור
+                        {/* The state in one word, from the same table the week
+                            grid reads, so the two views cannot name a day
+                            differently. `done` needs no pill - the green bar
+                            below the title already says it - and `open` needs
+                            none either, because a plain lifted card is what a
+                            task still to do looks like. */}
+                        {stateBadge && (
+                          <span
+                            className={`inline-flex items-center gap-1 text-[11px] font-bold px-2 py-0.5 rounded-full ${stateBadge.badge}`}
+                          >
+                            <StateIcon className="w-3 h-3" /> {stateBadge.label}
                           </span>
-                        ) : cancelled ? (
-                          <span className="inline-flex items-center gap-1 text-[10px] font-bold text-[#8C7E6A] bg-[#F1ECE3] px-2 py-0.5 rounded-full">
-                            <X className="w-3 h-3" /> בוטל
+                        )}
+                        {/* A skip is not a state: it hands the turn on and
+                            leaves the day owed, so it rides alongside the state
+                            rather than replacing it. It used to be the faintest
+                            text on the card. */}
+                        {handedOn && (
+                          <span
+                            className={`inline-flex items-center gap-1 text-[11px] font-bold px-2 py-0.5 rounded-full ${HANDED_ON.badge}`}
+                            title={`${nameOf(assignment.skippedBy ?? undefined)} העביר/ה הלאה`}
+                          >
+                            <HandedOnIcon className="w-3 h-3" /> {HANDED_ON.label}
                           </span>
-                        ) : null}
+                        )}
+                        {/* Provenance, which the engine has always known and
+                            only the grid ever showed. If a day is not whose
+                            turn it looks like, the card has to be able to say
+                            why - that is the whole argument this app settles. */}
+                        {relocation && (
+                          <span
+                            className={`inline-flex items-center gap-1 text-[11px] font-bold px-2 py-0.5 rounded-full ${RELOCATED.badge}`}
+                          >
+                            <RelocationIcon className="w-3 h-3" /> {relocation}
+                          </span>
+                        )}
                       </div>
                       {/* Everything that describes the task rather than its
                           state reads as one quiet line. As pills they were six

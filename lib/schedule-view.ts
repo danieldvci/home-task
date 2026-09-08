@@ -58,6 +58,155 @@ export type ScheduleRow = {
   cells: ScheduleCell[];
 };
 
+// --- How a state looks ------------------------------------------------------
+//
+// `buildScheduleRows` exists so the two views cannot disagree about a date.
+// Nothing used to stop them disagreeing about how a date *looks*, and they did:
+// the day list called an overdue day `באיחור` and tinted it #B9553D, the week
+// grid called the same day `לא בוצע` and drew its legend swatch in rose-500,
+// `open` was styled identically to `none`, and `cancelled` was styled
+// identically to `unavailable` despite meaning the opposite thing - one is a
+// decision somebody made, the other is the app reporting it has nobody to ask.
+//
+// Everything that draws a chore-and-day pair resolves through the table below:
+// the day list, the week grid, the grid's own legend, and the activity log's
+// action pills. A divergence now has to be introduced here to exist.
+//
+// The glyph is a name rather than a component so this module stays free of
+// React and keeps running under `tsx` in the test suite. Callers map it.
+//
+// Colour is never the only difference. This is a household app used by
+// children, and red-against-green is the commonest colour-blindness axis, so
+// every state also differs by glyph, and `cancelled` differs from
+// `unavailable` by border style as well as by tint.
+
+export type StateGlyph = 'none' | 'clock' | 'alert' | 'forward' | 'check' | 'x' | 'userX';
+
+export type StatePresentation = {
+  /** One label per state, in every view. */
+  label: string;
+  glyph: StateGlyph;
+  /** Nothing is owed: the day is done or written off. */
+  settled: boolean;
+  /** Somebody still owes this day. */
+  owed: boolean;
+  /** Card surface in the day list. */
+  surface: string;
+  /** Badge or pill, on a card or in the legend. */
+  badge: string;
+  /** The marker on a week-grid cell, and its swatch in the legend. */
+  dot: string;
+};
+
+/**
+ * Frozen, and keyed by state so a lookup is a lookup.
+ *
+ * `statePresentation` runs once per rendered cell and a week grid is chores
+ * times seven cells wide, so this deliberately does not build an object or
+ * compose a class string per call.
+ */
+const STATE_PRESENTATION: Readonly<Record<CellState, StatePresentation>> = Object.freeze({
+  none: {
+    label: 'לא בתוכנית',
+    glyph: 'none',
+    settled: false,
+    owed: false,
+    surface: 'bg-sunken border-line',
+    badge: 'text-ink-ghost bg-transparent',
+    dot: 'bg-transparent'
+  },
+  open: {
+    label: 'להשלמה',
+    glyph: 'clock',
+    settled: false,
+    owed: true,
+    surface: 'bg-card border-line shadow-sm',
+    badge: 'text-accent bg-accent/10',
+    dot: 'bg-accent-soft'
+  },
+  overdue: {
+    label: 'באיחור',
+    glyph: 'alert',
+    settled: false,
+    owed: true,
+    surface: 'bg-owed/[0.07] border-owed/30',
+    badge: 'text-owed bg-owed/10',
+    dot: 'bg-owed'
+  },
+  done: {
+    label: 'בוצע',
+    glyph: 'check',
+    settled: true,
+    owed: false,
+    surface: 'bg-settled/10 border-settled/40',
+    badge: 'text-settled-ink bg-settled/20',
+    dot: 'bg-settled'
+  },
+  cancelled: {
+    // Written off on purpose. The dashed border is the tell that separates this
+    // from `unavailable`, which shares its muted tint but means the opposite.
+    label: 'ויתרנו',
+    glyph: 'x',
+    settled: true,
+    owed: false,
+    surface: 'bg-sunken border-dashed border-line-strong',
+    badge: 'text-ink-mid bg-inset',
+    dot: 'bg-closed'
+  },
+  unavailable: {
+    label: 'אין דייר זמין',
+    glyph: 'userX',
+    settled: false,
+    // Owed by nobody. The rotation is empty, everyone in it is away, or the
+    // resident holding it has been deleted - the app's problem, not the
+    // household's, so this must not read as a debt anybody can settle.
+    owed: false,
+    surface: 'bg-inset border-line',
+    badge: 'text-ink-muted bg-inset',
+    dot: 'bg-idle'
+  }
+});
+
+export const statePresentation = (state: CellState): StatePresentation =>
+  STATE_PRESENTATION[state];
+
+/**
+ * A skip is not a state, and this is where that stops being invisible.
+ *
+ * Skipping hands the turn to the next resident and leaves the day itself open,
+ * so it still resolves as `open` or `overdue` and is still owed - which is
+ * exactly right and exactly why it had nowhere to be drawn. The day list
+ * carried it as the lowest-contrast text in the card and the week grid did not
+ * carry it at all.
+ *
+ * So it is a modifier on a state rather than a state, and it is a constant
+ * rather than a computed object for the same reason the table above is.
+ */
+export const HANDED_ON: Readonly<Pick<StatePresentation, 'label' | 'glyph' | 'badge' | 'dot'>> =
+  Object.freeze({
+    label: 'הועבר הלאה',
+    glyph: 'forward',
+    badge: 'text-handed-on bg-handed-on/10',
+    dot: 'bg-handed-on'
+  });
+
+/** True when this day's turn was passed on and the day is still owed. */
+export const isHandedOn = (cell: ScheduleCell) =>
+  !!cell.assignment?.skippedBy && statePresentation(cell.state).owed;
+
+/**
+ * How a relocated day says so. `rearranged` and `movedFrom` were already
+ * carried on every cell for this and only the grid ever read them, as a 12px
+ * badge; the day list said nothing at all.
+ */
+export const RELOCATED: Readonly<{ moved: string; traded: string; badge: string; dot: string }> =
+  Object.freeze({
+    moved: 'הועבר',
+    traded: 'הוחלף',
+    badge: 'text-relocated bg-relocated/15',
+    dot: 'bg-relocated'
+  });
+
 export type ScheduleFilters = {
   /** Empty means every chore. */
   choreIds: string[];
