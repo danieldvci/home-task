@@ -256,6 +256,11 @@ export default function ChoresApp() {
   const users = usersSnap?.householdId === householdId ? usersSnap.users : [];
   const chores = choresSnap?.householdId === householdId ? choresSnap.chores : [];
   const logs = logsSnap?.householdId === householdId ? logsSnap.logs : [];
+  // An unanswered snapshot reads as a household with no chores, which is the
+  // same shape as a household that has none. The day list said "הכל נקי ומסודר"
+  // for the moment in between, so it congratulated everybody on a schedule it
+  // had not seen yet.
+  const choresLoading = !!householdId && choresSnap?.householdId !== householdId;
 
   const profileScope = user && householdId ? `${user.uid}:${householdId}` : '';
   const [pickedProfile, setPickedProfile] = useState<{ scope: string; id: string } | null>(null);
@@ -1935,7 +1940,30 @@ export default function ChoresApp() {
         </div>
 
         <AnimatePresence mode="popLayout">
-          {dayEntries.length === 0 ? (
+          {choresLoading ? (
+            // Card-shaped, because the honest thing to show while the schedule
+            // is on its way is the shape of the schedule. A spinner says "wait"
+            // and an empty state says "there is nothing", and only one of those
+            // is true here.
+            <div aria-busy="true" aria-live="polite" className="flex flex-col gap-4">
+              <span className="sr-only">טוען משימות…</span>
+              {[0, 1, 2].map(i => (
+                <div
+                  key={i}
+                  className="p-5 rounded-3xl border bg-white border-[#E6E0D4] shadow-sm animate-pulse"
+                >
+                  <div className="flex justify-between items-start mb-4 gap-3">
+                    <div className="flex-1 min-w-0 flex flex-col gap-2">
+                      <div className="h-5 w-2/3 rounded-lg bg-[#F1ECE3]" />
+                      <div className="h-3 w-1/3 rounded-md bg-[#F5F1EA]" />
+                    </div>
+                    <div className="w-10 h-10 rounded-full bg-[#F1ECE3] flex-shrink-0" />
+                  </div>
+                  <div className="h-14 rounded-2xl bg-[#F1ECE3]" />
+                </div>
+              ))}
+            </div>
+          ) : dayEntries.length === 0 ? (
             <motion.div 
               initial={{ opacity: 0 }} animate={{ opacity: 1 }}
               className="flex flex-col items-center justify-center py-16 text-center"
