@@ -197,6 +197,73 @@ const MEMBER_SOFT_LIMIT = 20;
 const ADMIN_ONLY_HINT = 'רק מנהל הבית יכול לבצע פעולה זו';
 const noopSubscribe = () => () => {};
 
+/**
+ * What this day amounts to, and which day it is.
+ *
+ * Two problems in one bar. A resident opens the app to find out what they have
+ * to do, and that answer sat below four rows of filters. And every action here
+ * writes to the day being *viewed*, while the only thing naming that day was a
+ * strip of numbers that scrolled away with the list - so a full-width green
+ * "done" button could sit on screen with nothing saying which date it recorded.
+ *
+ * Sticky, therefore, and loud when the day is not today.
+ */
+function DayHeading({
+  summary,
+  isToday,
+  dateLabel,
+  onBackToToday
+}: {
+  summary: { owed: number; settled: number; mine: number };
+  isToday: boolean;
+  dateLabel: string;
+  onBackToToday: () => void;
+}) {
+  const { owed, settled, mine } = summary;
+  const headline =
+    owed === 0
+      ? settled > 0
+        ? 'הכל בוצע'
+        : 'אין מה לעשות'
+      : mine > 0
+        ? `${mine} משימות שלך`
+        : `${owed} משימות פתוחות`;
+
+  return (
+    <div
+      className={`sticky top-0 z-10 -mx-6 px-6 py-3 border-b backdrop-blur-xl ${
+        isToday ? 'bg-page/90 border-line' : 'bg-warn/15 border-warn/40'
+      }`}
+    >
+      <div className="flex items-center justify-between gap-3">
+        <div className="min-w-0">
+          <p className="text-base font-extrabold text-ink truncate">{headline}</p>
+          {/* The date is the safety-critical half of this bar, so it is never
+              implied. "היום" is only ever shown when it is true. */}
+          <p className="text-xs font-bold text-ink-muted truncate">
+            {isToday ? `היום · ${dateLabel}` : dateLabel}
+          </p>
+        </div>
+        {owed > 0 && (
+          <span className="flex-shrink-0 text-xs font-bold text-ink-mid tabular-nums">
+            {settled}/{settled + owed}
+          </span>
+        )}
+        {/* Only a way back, never a way to a day nobody asked for. */}
+        {!isToday && (
+          <button
+            type="button"
+            onClick={onBackToToday}
+            className="flex-shrink-0 px-3 py-2 rounded-2xl bg-card border border-warn/50 text-xs font-bold text-warn-ink hover:bg-warn/10 transition-colors"
+          >
+            חזרה להיום
+          </button>
+        )}
+      </div>
+    </div>
+  );
+}
+
 function AdminHint({
   allowed,
   hint = ADMIN_ONLY_HINT,
@@ -208,28 +275,66 @@ function AdminHint({
   className?: string;
   children: React.ReactNode;
 }) {
+  const { showToast } = useToast();
+  if (allowed) return <span className={className}>{children}</span>;
+
+  // A refusal that cannot be asked for a reason is just a broken button.
+  //
+  // The controls inside carry `disabled:pointer-events-none`, so a hover never
+  // reaches them and this `title` was the only explanation. On a phone there is
+  // no hover, which is where the app is actually used: a member saw a row of
+  // greyed-out controls and no way to find out why. Because the children pass
+  // pointer events through, the tap lands here, and here it can answer.
+  const reason = hint ?? ADMIN_ONLY_HINT;
+  const answer = () => showToast(reason, 'info');
   return (
-    <span title={allowed ? undefined : hint} className={className}>
+    <span
+      role="button"
+      tabIndex={0}
+      title={reason}
+      aria-label={reason}
+      onClick={answer}
+      onKeyDown={e => {
+        if (e.key === 'Enter' || e.key === ' ') {
+          e.preventDefault();
+          answer();
+        }
+      }}
+      className={`cursor-help ${className ?? ''}`}
+    >
       {children}
     </span>
   );
 }
 
+/**
+ * The activity log's action pills.
+ *
+ * The colours are taken from `statePresentation` rather than restated, because
+ * a log entry and the day it describes are the same fact: "דילוג משימה" in the
+ * feed should be the colour a handed-on day is in the grid.
+ *
+ * `העברת יום` and `החלפת ימים` were logged but missing here, so a rearranged
+ * day - the one action whose whole point is being able to see it happened -
+ * fell through to the generic fallback.
+ */
 const ACTION_STYLES: Record<string, { Icon: LucideIcon; className: string }> = {
-  'ביצוע משימה': { Icon: CheckCircle2, className: 'bg-[#A1C181]/20 text-[#5F7A45]' },
-  'ביטול משימה': { Icon: RotateCcw, className: 'bg-[#E9C46A]/25 text-[#8A6D1F]' },
-  'דילוג משימה': { Icon: FastForward, className: 'bg-[#3D5A80]/15 text-[#3D5A80]' },
-  'ביטול דילוג': { Icon: RotateCcw, className: 'bg-[#3D5A80]/15 text-[#3D5A80]' },
-  'החלפת תור': { Icon: Repeat, className: 'bg-[#7B6CA8]/20 text-[#5C4F86]' },
-  'סגירת יום ללא ביצוע': { Icon: X, className: 'bg-[#8C7E6A]/20 text-[#6B5E4C]' },
-  'ביטול סגירת יום': { Icon: RotateCcw, className: 'bg-[#8C7E6A]/20 text-[#6B5E4C]' },
-  'יצירת משימה': { Icon: Plus, className: 'bg-[#A1C181]/20 text-[#5F7A45]' },
-  'עריכת משימה': { Icon: Pencil, className: 'bg-[#8C7E6A]/20 text-[#6B5E4C]' },
-  'מחיקת משימה': { Icon: Trash2, className: 'bg-rose-100 text-rose-600' },
-  'ניתוק דייר': { Icon: UserMinus, className: 'bg-rose-100 text-rose-600' },
-  [MANUAL_LOG_ACTION]: { Icon: StickyNote, className: 'bg-[#E9C46A]/25 text-[#8A6D1F]' }
+  'ביצוע משימה': { Icon: CheckCircle2, className: statePresentation('done').badge },
+  'ביטול משימה': { Icon: RotateCcw, className: 'bg-warn/25 text-warn-ink' },
+  'דילוג משימה': { Icon: FastForward, className: HANDED_ON.badge },
+  'ביטול דילוג': { Icon: RotateCcw, className: HANDED_ON.badge },
+  'החלפת תור': { Icon: Repeat, className: 'bg-note/20 text-note-ink' },
+  'העברת יום': { Icon: MOVED_ICON, className: RELOCATED.badge },
+  'החלפת ימים': { Icon: TRADED_ICON, className: RELOCATED.badge },
+  'סגירת יום ללא ביצוע': { Icon: X, className: statePresentation('cancelled').badge },
+  'ביטול סגירת יום': { Icon: RotateCcw, className: statePresentation('cancelled').badge },
+  'יצירת משימה': { Icon: Plus, className: statePresentation('done').badge },
+  'עריכת משימה': { Icon: Pencil, className: 'bg-inset text-ink-mid' },
+  'מחיקת משימה': { Icon: Trash2, className: 'bg-danger/15 text-danger' },
+  'ניתוק דייר': { Icon: UserMinus, className: 'bg-danger/15 text-danger' },
+  [MANUAL_LOG_ACTION]: { Icon: StickyNote, className: 'bg-warn/25 text-warn-ink' }
 };
-const DEFAULT_ACTION_STYLE = { Icon: Activity, className: 'bg-[#F5F1EA] text-[#8C7E6A]' };
+const DEFAULT_ACTION_STYLE = { Icon: Activity, className: 'bg-sunken text-ink-muted' };
 
 // --- Main App Component ---
 export default function ChoresApp() {
@@ -292,7 +397,18 @@ export default function ChoresApp() {
   // Re-derived on every clock tick, so anything keyed off it rolls over at
   // midnight without a reload.
   const todayStr = today.toDateString();
-  const [selectedDate, setSelectedDate] = useState<Date>(today);
+  // `null` means "follow today", and that is the fix for a real way to lose
+  // work. Every action writes to the day being viewed, not to today. Held as a
+  // date, a tab left open overnight kept the selection pinned to a yesterday
+  // that had quietly become overdue, while the day strip re-anchored around the
+  // new today - so the first tap next morning backdated a completion onto it.
+  // Following today by default means that cannot happen; a date the user
+  // actually picked is honoured, and the header says which one it is.
+  const [pinnedDate, setPinnedDate] = useState<Date | null>(null);
+  const selectedDate = pinnedDate ?? today;
+  // Choosing today is choosing to follow it.
+  const setSelectedDate = (date: Date) =>
+    setPinnedDate(dayKey(date) === dayKey(today) ? null : normalizeDay(date));
   const selectedDayIndex = selectedDate.getDay();
   const selectedDateStr = selectedDate.toDateString();
 
@@ -1805,6 +1921,21 @@ export default function ChoresApp() {
       weekHasAnySchedule
     } = schedule;
 
+    // What the day amounts to, in one line. Counted from the rendered rows
+    // rather than from a second pass, and through `statePresentation` so
+    // "still owed" means the same thing here as it does on the cards: a
+    // skipped day counts, an unavailable one does not, because nobody owes it.
+    const daySummary = dayEntries.reduce(
+      (acc, { cell }) => {
+        const p = statePresentation(cell.state);
+        if (p.owed) acc.owed += 1;
+        if (p.settled) acc.settled += 1;
+        if (p.owed && cell.userId === currentUserId) acc.mine += 1;
+        return acc;
+      },
+      { owed: 0, settled: 0, mine: 0 }
+    );
+
     const weekRangeLabel = `${weekDays[0].toLocaleDateString('he-IL', { day: '2-digit', month: '2-digit' })} – ${weekDays[6].toLocaleDateString('he-IL', { day: '2-digit', month: '2-digit' })}`;
 
     // Rearranging is off while a person filter is on. The grid renders another
@@ -1819,6 +1950,21 @@ export default function ChoresApp() {
 
     return (
       <div className="flex flex-col gap-4 pb-24">
+        {/* The answer, before the controls that narrow it.
+            A resident opens this to find out what they have to do, and that
+            used to be below the fold behind four rows of filters. Derived from
+            the same rows the list renders, so it cannot contradict them. */}
+        <DayHeading
+          summary={daySummary}
+          isToday={isToday}
+          dateLabel={selectedDate.toLocaleDateString('he-IL', {
+            weekday: 'long',
+            day: 'numeric',
+            month: 'long'
+          })}
+          onBackToToday={() => setSelectedDate(today)}
+        />
+
         {/* Choosing what to look at is one decision, so it reads as one block.
             Stacked at the section gap plus a margin each, these four bars cost
             most of a phone screen before the first task appeared. */}
