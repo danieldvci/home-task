@@ -353,13 +353,20 @@ History both use `MultiSelectFilter`.
   is occasional and the other is permanent — and label them, because
   `FastForward` and `Repeat` are not self-evident icons for "hand the turn on"
   and "reorder the rotation for good".
-- **Invert the confirmation policy.** Drop the modal on `בוצע` and make the tap
-  immediate with undo in the toast; keep the camera as an optional affordance on
-  the completed card rather than a gate in front of finishing. Add a
-  confirmation to writing a day off, which is the destructive one. This also
-  clears the way for the celebration on the second tier: a tap that resolves
-  instantly has somewhere to put a reward, and a tap that opens a dialog does
-  not.
+- **Invert the confirmation policy.** *Decided — build this as written.* Drop
+  the modal on `בוצע` and make the tap immediate with undo in the toast; keep
+  the camera as an optional affordance on the completed card rather than a gate
+  in front of finishing. Add a confirmation to writing a day off, which is the
+  destructive one. This also clears the way for the celebration on the second
+  tier: a tap that resolves instantly has somewhere to put a reward, and a tap
+  that opens a dialog does not.
+
+  Two things to get right when it is built. The undo has to outlive the toast,
+  because a toast is four seconds and a misplaced tap is noticed later than
+  that — `handleUndoDone` already exists and the completed card already offers
+  `בטל סימון`, so the toast is a shortcut to it rather than the only way back.
+  And `DoneConfirmModal` is where proof photos are attached today, so removing
+  the gate means moving that affordance, not dropping it.
 - **Show the provenance inline.** When a cell is `rearranged` or has
   `movedFrom`, say so on the card in words — `הועבר מיום שלישי`,
   `התחלפתם ביניכם` — not only as a grid badge. `relativeDayLabel` already
