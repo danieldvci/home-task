@@ -11,11 +11,13 @@
 import {
   Chore,
   DayAssignment,
-  RotationUser,
+  Residents,
   choreOccursOnDate,
   choreStartDate,
   dayKey,
   getDayRecord,
+  indexUsers,
+  isResident,
   normalizeDay,
   resolveDayAssignee
 } from './rotation';
@@ -82,7 +84,7 @@ const provenance = (assignment: DayAssignment) => ({
 
 export const buildScheduleCell = (
   chore: Chore,
-  users: RotationUser[],
+  users: Residents,
   day: Date,
   personId: string | 'all',
   today: Date
@@ -103,7 +105,7 @@ export const buildScheduleCell = (
 
   // The pointer always lands on somebody, so an open day is only genuinely
   // owned when that somebody still has a profile and is not away that day.
-  const owned = !!userId && users.some(u => u.id === userId) && !assignment.everyoneAway;
+  const owned = !!userId && isResident(users, userId) && !assignment.everyoneAway;
 
   // An unowned day belongs to nobody, so it never survives a person filter.
   if (personId !== 'all' && (!owned || userId !== personId)) return emptyCell(day);
@@ -135,12 +137,15 @@ export const buildScheduleCell = (
  */
 export const buildScheduleRows = (
   chores: Chore[],
-  users: RotationUser[],
+  users: Residents,
   days: Date[],
   filters: ScheduleFilters,
   today: Date
-): ScheduleRow[] =>
-  chores
+): ScheduleRow[] => {
+  // One index for the whole pass. Every cell below needs the same lookup, and a
+  // pass is chores times days cells wide.
+  const residents = indexUsers(users);
+  return chores
     .filter(chore => filters.choreIds.length === 0 || filters.choreIds.includes(chore.id))
     .filter(
       chore =>
@@ -148,9 +153,10 @@ export const buildScheduleRows = (
     )
     .map(chore => ({
       chore,
-      cells: days.map(day => buildScheduleCell(chore, users, day, filters.personId, today))
+      cells: days.map(day => buildScheduleCell(chore, residents, day, filters.personId, today))
     }))
     .filter(row => row.cells.some(cell => cell.state !== 'none'));
+};
 
 /** Dropping on an empty day relocates the occurrence; dropping on somebody
  *  else's day trades the two. */
@@ -175,12 +181,13 @@ export const isPickable = (cell: ScheduleCell) =>
  */
 export const dropTargets = (
   chore: Chore,
-  users: RotationUser[],
+  users: Residents,
   days: Date[],
   sourceIndex: number,
   today: Date
 ): DropTarget[] => {
-  const cells = days.map(day => buildScheduleCell(chore, users, day, 'all', today));
+  const residents = indexUsers(users);
+  const cells = days.map(day => buildScheduleCell(chore, residents, day, 'all', today));
   const source = cells[sourceIndex];
   if (!source || !isPickable(source)) return [];
 
@@ -224,14 +231,15 @@ export const MISSED_LOOKBACK_DAYS = 14;
  */
 export const missedOccurrences = (
   chore: Chore,
-  users: RotationUser[],
+  users: Residents,
   before: Date,
   today: Date,
   lookbackDays: number = MISSED_LOOKBACK_DAYS
 ): ScheduleCell[] => {
+  const residents = indexUsers(users);
   const missed: ScheduleCell[] = [];
   for (let i = 1; i <= lookbackDays; i++) {
-    const cell = buildScheduleCell(chore, users, shiftDays(before, -i), 'all', today);
+    const cell = buildScheduleCell(chore, residents, shiftDays(before, -i), 'all', today);
     // Only a day somebody could actually have done. A day when the whole
     // rotation was away is nobody's debt.
     if (cell.state === 'overdue') missed.push(cell);

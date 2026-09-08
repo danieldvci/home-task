@@ -569,4 +569,79 @@ const ALL: ScheduleFilters = { choreIds: [], category: 'all', personId: 'all' };
   );
 }
 
+// --- What a pass over the schedule is allowed to cost -----------------------
+//
+// Resolving one cell walks the calendar from today to the day in question and
+// consults the rotation at every occurrence on the way. That made the cost of a
+// week grid proportional to the size of the household as well, because each
+// consultation searched the resident array. It is a lookup, so these assert it
+// is one: `Residents` accepts an index, every entry point builds it at most
+// once per pass, and a household that grows does not make the grid slower per
+// resident.
+//
+// A budget nobody checks is a wish, which is why this counts rather than times.
+
+class CountingIndex extends Map<string, RotationUser> {
+  lookups = 0;
+  override get(id: string) {
+    this.lookups++;
+    return super.get(id);
+  }
+}
+
+const countingTrio = () => new CountingIndex(trio.map(u => [u.id, u] as const));
+
+{
+  // The index is handed through, not rebuilt. Were any layer to call
+  // `indexUsers` on an array it had made itself, the count below would be zero
+  // because the copy would absorb the lookups.
+  const index = countingTrio();
+  const rows = buildScheduleRows([makeChore()], index, weekAround(TUE), ALL, TUE);
+  assert.equal(rows.length, 1, 'a daily chore occupies the whole week');
+  assert.ok(
+    index.lookups > 0,
+    'the index the caller passed is the one consulted, not a copy of it'
+  );
+}
+
+{
+  // The same schedule, asked for through both shapes, has to agree. Accepting
+  // two shapes is only safe while it cannot change an answer.
+  const week = weekAround(TUE);
+  const chore = makeChore({
+    completions: { [dayKey(MON)]: { userId: 'u1', at: MON.toISOString() } }
+  });
+  const viaArray = buildScheduleRows([chore], trio, week, ALL, TUE);
+  const viaIndex = buildScheduleRows([chore], countingTrio(), week, ALL, TUE);
+  assert.deepEqual(
+    viaIndex[0].cells.map(c => [c.state, c.userId]),
+    viaArray[0].cells.map(c => [c.state, c.userId]),
+    'an array and an index describe the same week'
+  );
+}
+
+{
+  // The budget itself. Lookups should scale with the work — cells, and the
+  // occurrences each cell walks past — and not with the number of residents,
+  // which is the factor the array search added.
+  const week = weekAround(TUE);
+  const chores = Array.from({ length: 10 }, (_, i) => makeChore({ id: `c${i}` }));
+
+  const small = new CountingIndex(trio.map(u => [u.id, u] as const));
+  buildScheduleRows(chores, small, week, ALL, TUE);
+
+  const crowd = Array.from({ length: 12 }, (_, i) => present(`x${i}`));
+  const large = new CountingIndex(
+    [...trio, ...crowd].map(u => [u.id, u] as const)
+  );
+  buildScheduleRows(chores, large, week, ALL, TUE);
+
+  assert.ok(small.lookups > 0, 'the grid does consult the rotation, so this measures something');
+  assert.equal(
+    large.lookups,
+    small.lookups,
+    'quadrupling the household does not cost the grid a single extra lookup'
+  );
+}
+
 console.log('schedule-view tests passed');

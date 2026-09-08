@@ -1,6 +1,6 @@
 'use client';
 
-import React, { useState, useEffect, useRef, useSyncExternalStore } from 'react';
+import React, { useState, useEffect, useMemo, useRef, useSyncExternalStore } from 'react';
 import { 
   CheckCircle2, 
   FastForward, 
@@ -67,7 +67,6 @@ import {
   busiestDay
 } from '../lib/activity-stats';
 import {
-  ALL_TASKS,
   DEFAULT_CATEGORY,
   buildScheduleRows,
   carryOverLabel,
@@ -467,6 +466,102 @@ export default function ChoresApp() {
     }
   }, [avatarUploadRequestId]);
 
+  // --- The schedule, built once ---------------------------------------------
+  //
+  // Everything the tasks tab draws reads these rows, and nothing below calls
+  // `buildScheduleRows` again. Resolving one cell walks the calendar from today
+  // to the day in question and consults the rotation at every occurrence on the
+  // way, so a pass over a week is not cheap enough to do casually. Two things
+  // were doing it casually.
+  //
+  // The day list and the week grid were both built on every render whichever
+  // one was on screen, so each view paid for the other.
+  //
+  // And the dependencies below are keyed on `dayKey(today)`, not on `today`,
+  // which is a fresh Date on every render. Keyed on the object this memo could
+  // never hit: the minute tick that keeps absence windows current would rebuild
+  // the whole schedule sixty times an hour. Keyed on the day the tick is free,
+  // and the rebuild happens where it has to, when the date rolls over.
+  const todayKey = dayKey(today);
+  const selectedKey = dayKey(selectedDate);
+
+  // Both views read the same schedule through the same filters, so whatever the
+  // grid shows in a column is what the day list shows for that date.
+  const scheduleFilters: ScheduleFilters = useMemo(
+    () => ({
+      choreIds: choreFilterIds,
+      category: selectedCategoryFilter,
+      personId: selectedUserId === 'my_tasks' ? (currentUserId ?? 'all') : selectedUserId
+    }),
+    [choreFilterIds, selectedCategoryFilter, selectedUserId, currentUserId]
+  );
+
+  const schedule = useMemo(() => {
+    const showWeek = tasksView === 'week';
+    // The grid and its drop targets have to index into the same array, which is
+    // why this is built here and handed out rather than recomputed per reader.
+    const weekDays = weekAround(selectedDate);
+
+    const toWeekPerson = (u: UserType): WeekPerson => ({
+      id: u.id,
+      name: u.name,
+      color: u.color,
+      photoURL: resolvePhoto(u)
+    });
+
+    // A row survives only when at least one of its cells is scheduled, so with
+    // a single day the cell is always present.
+    const dayEntries = showWeek
+      ? []
+      : buildScheduleRows(chores, users, [selectedDate], scheduleFilters, today).flatMap(row => {
+          const cell = row.cells[0];
+          return cell.assignment ? [{ chore: row.chore, cell, assignment: cell.assignment }] : [];
+        });
+
+    const weekRows: WeekRow[] = !showWeek
+      ? []
+      : buildScheduleRows(chores, users, weekDays, scheduleFilters, today).map(row => ({
+          choreId: row.chore.id,
+          choreName: row.chore.name,
+          frequencyLabel: frequencyLabel(row.chore.frequency, row.chore.customDays),
+          cells: row.cells.map(cell => {
+            const u = users.find(x => x.id === cell.userId);
+            return {
+              state: cell.state,
+              person: u ? toWeekPerson(u) : null,
+              movedFrom: cell.movedFrom,
+              rearranged: cell.rearranged
+            };
+          })
+        }));
+
+    const weekLegendIds = new Set(
+      weekRows.flatMap(row => row.cells.flatMap(c => (c.person ? [c.person.id] : [])))
+    );
+
+    // An empty view means one of two opposite things, and each view used to
+    // assume a different one: the day list called the house clean when the
+    // default "my tasks" filter was simply hiding everyone else's turn, and the
+    // week grid told a household with no chores to change a filter it had never
+    // set. Asking unfiltered says which it is. This used to ask by building a
+    // second set of rows, which resolved an assignee for every cell only to
+    // count the rows; whether anything is scheduled needs no assignee.
+    const anyScheduled = (days: Date[]) =>
+      chores.some(chore => days.some(day => choreOccursOnDate(chore, day, today)));
+
+    return {
+      weekDays,
+      dayEntries,
+      weekRows,
+      weekLegend: users.filter(u => weekLegendIds.has(u.id)).map(toWeekPerson),
+      dayHasAnySchedule: dayEntries.length > 0 || anyScheduled([selectedDate]),
+      weekHasAnySchedule: weekRows.length > 0 || anyScheduled(weekDays)
+    };
+    // `today` and `selectedDate` are read through their day keys above: a new
+    // Date for the same day must not invalidate a whole schedule.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [chores, users, scheduleFilters, tasksView, selectedKey, todayKey, user]);
+
   if (authLoading || houseLoading) {
     return (
       <div className="min-h-screen bg-[#FAF9F6] flex items-center justify-center">
@@ -561,11 +656,6 @@ export default function ChoresApp() {
   // selection out of that range rather than leaving the day view showing a date
   // no button matches.
   const daysArray = dayStripDays(today, selectedDate);
-
-  // The week containing the selected day, so the two views always describe the
-  // same stretch of time. Pinning this to `today` meant picking a date in the
-  // day view and switching to the week view showed a different week.
-  const weekDays = weekAround(selectedDate);
 
   const logAction = async (action: string, details: string, photoUrl?: string) => {
     if (!householdId || !currentUserId || !user) return;
@@ -1701,64 +1791,17 @@ export default function ChoresApp() {
   const renderTasks = () => {
     const isPastDay = normalizeDay(selectedDate).getTime() < normalizeDay(today).getTime();
     const isToday = normalizeDay(selectedDate).getTime() === normalizeDay(today).getTime();
-    const toWeekPerson = (u: UserType): WeekPerson => ({
-      id: u.id,
-      name: u.name,
-      color: u.color,
-      photoURL: resolvePhoto(u)
-    });
 
-    // Both views read the same schedule through the same filters, so whatever
-    // the grid shows in a column is what the day list shows for that date.
-    const filters: ScheduleFilters = {
-      choreIds: choreFilterIds,
-      category: selectedCategoryFilter,
-      personId: selectedUserId === 'my_tasks' ? (currentUserId ?? 'all') : selectedUserId
-    };
-
-    // A row survives only when at least one of its cells is scheduled, so with a
-    // single day the cell is always present.
-    const dayEntries = buildScheduleRows(chores, users, [selectedDate], filters, today).flatMap(
-      row => {
-        const cell = row.cells[0];
-        return cell.assignment ? [{ chore: row.chore, cell, assignment: cell.assignment }] : [];
-      }
-    );
-
-    const weekRows: WeekRow[] = buildScheduleRows(chores, users, weekDays, filters, today).map(
-      row => ({
-        choreId: row.chore.id,
-        choreName: row.chore.name,
-        frequencyLabel: frequencyLabel(row.chore.frequency, row.chore.customDays),
-        cells: row.cells.map(cell => {
-          const u = users.find(x => x.id === cell.userId);
-          return {
-            state: cell.state,
-            person: u ? toWeekPerson(u) : null,
-            movedFrom: cell.movedFrom,
-            rearranged: cell.rearranged
-          };
-        })
-      })
-    );
-
-    const weekLegendIds = new Set(
-      weekRows.flatMap(row => row.cells.flatMap(c => (c.person ? [c.person.id] : [])))
-    );
-    const weekLegend = users.filter(u => weekLegendIds.has(u.id)).map(toWeekPerson);
-
-    // An empty view means one of two opposite things, and each view used to
-    // assume a different one: the day list called the house clean when the
-    // default "my tasks" filter was simply hiding everyone else's turn, and the
-    // week grid told a household with no chores to change a filter it had never
-    // set. Rebuilding unfiltered says which it is. `||` short-circuits, so the
-    // second pass only runs when there is nothing on screen to explain.
-    const dayHasAnySchedule =
-      dayEntries.length > 0 ||
-      buildScheduleRows(chores, users, [selectedDate], ALL_TASKS, today).length > 0;
-    const weekHasAnySchedule =
-      weekRows.length > 0 ||
-      buildScheduleRows(chores, users, weekDays, ALL_TASKS, today).length > 0;
+    // Built once, above the early returns. Nothing here recomputes it.
+    const filters = scheduleFilters;
+    const {
+      weekDays,
+      dayEntries,
+      weekRows,
+      weekLegend,
+      dayHasAnySchedule,
+      weekHasAnySchedule
+    } = schedule;
 
     const weekRangeLabel = `${weekDays[0].toLocaleDateString('he-IL', { day: '2-digit', month: '2-digit' })} – ${weekDays[6].toLocaleDateString('he-IL', { day: '2-digit', month: '2-digit' })}`;
 
