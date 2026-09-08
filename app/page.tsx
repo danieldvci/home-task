@@ -648,7 +648,8 @@ export default function ChoresApp() {
               person: u ? toWeekPerson(u) : null,
               movedFrom: cell.movedFrom,
               rearranged: cell.rearranged,
-              handedOn: isHandedOn(cell)
+              handedOn: isHandedOn(cell),
+              vacatedTo: cell.vacatedTo
             };
           })
         }));

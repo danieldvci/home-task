@@ -28,6 +28,10 @@ export type WeekCell = {
   /** The turn was passed on and the day is still owed. Not a `CellState`,
    *  because a skip settles nothing - see `isHandedOn` in lib/schedule-view. */
   handedOn?: boolean;
+  /** This day's occurrence was moved away to another. The day has nothing on
+   *  it, so it resolves to `none`, but it is not free space and a drop on it
+   *  is refused - so it must not be drawn as though it were empty. */
+  vacatedTo?: string | null;
 };
 
 export type WeekRow = {
@@ -366,8 +370,8 @@ function DayCell({
 
   const targetStyle =
     dropKind === 'move'
-      ? 'ring-2 ring-dashed ring-[#A1C181] bg-[#A1C181]/10'
-      : 'ring-2 ring-dashed ring-[#7C9CBF] bg-[#7C9CBF]/10';
+      ? 'ring-2 ring-dashed ring-settled bg-settled/10'
+      : 'ring-2 ring-dashed ring-relocated bg-relocated/10';
 
   const interactive = !!onSelectDay || canPickUp || !!dropKind || rearranging;
   const inert = rearranging && !picked && !dropKind;
@@ -375,7 +379,7 @@ function DayCell({
   const body = dropKind ? (
     <span className="flex items-center justify-center w-7 h-7">
       {cell.state === 'none' ? (
-        <Plus className="w-4 h-4 text-[#6B8E4E]" strokeWidth={3} />
+        <Plus className="w-4 h-4 text-settled-ink" strokeWidth={3} />
       ) : (
         <span className="relative inline-block opacity-60">
           <CellContent cell={cell} />
@@ -383,7 +387,14 @@ function DayCell({
       )}
     </span>
   ) : cell.state === 'none' ? (
-    <span className="text-[#D8D1C4] text-sm font-bold">·</span>
+    // A day whose occurrence was moved away is empty and is not free. Drawn as
+    // a dot it invited a drag that `dropTargets` then refused without saying
+    // anything, which is indistinguishable from a broken grid.
+    cell.vacatedTo ? (
+      <MOVED_ICON className="w-4 h-4 mx-auto text-relocated" strokeWidth={2.5} />
+    ) : (
+      <span className="text-line-strong text-sm font-bold">·</span>
+    )
   ) : (
     <CellContent cell={cell} />
   );
@@ -391,10 +402,10 @@ function DayCell({
   return (
     <td
       data-day-index={dayIndex}
-      className={`px-0.5 py-1.5 align-middle ${isSelected ? 'bg-[#A1C181]/10' : ''}`}
+      className={`px-0.5 py-1 align-middle ${isSelected ? 'bg-settled/10' : ''}`}
     >
       {!interactive ? (
-        <div className="mx-auto w-fit" title={title}>
+        <div className="mx-auto flex items-center justify-center tap-target" title={title}>
           {body}
         </div>
       ) : (
@@ -421,13 +432,16 @@ function DayCell({
           aria-pressed={canPickUp ? picked : undefined}
           disabled={inert && !onSelectDay}
           className={[
-            'relative mx-auto flex items-center justify-center rounded-full transition-all',
+            // 44px, the figure both platform guidelines land on. These were
+            // 28px, which is under half the area and is the reason a tap on a
+            // neighbouring day was so easy to make.
+            'relative mx-auto flex items-center justify-center rounded-full transition-all tap-target',
             'select-none [-webkit-touch-callout:none]',
             canPickUp && dragEnabled ? 'cursor-grab active:cursor-grabbing' : '',
             dropKind ? targetStyle : '',
-            picked ? 'ring-2 ring-[#A1C181] shadow-sm' : '',
+            picked ? 'ring-2 ring-settled shadow-sm' : '',
             inert ? 'opacity-30' : '',
-            !rearranging ? 'active:scale-90 hover:ring-2 hover:ring-[#A1C181]/50' : ''
+            !rearranging ? 'active:scale-90 hover:ring-2 hover:ring-settled/50' : ''
           ]
             .filter(Boolean)
             .join(' ')}
@@ -626,7 +640,54 @@ export function WeekOverview({
         </div>
       )}
 
-      <div className="bg-white border border-[#E6E0D4] rounded-3xl shadow-sm overflow-x-auto">
+      {/* The key goes above the thing it explains.
+          Below the grid it was past the fold on every phone, so a resident met
+          six kinds of marker with no way to find out what any of them meant
+          until after they had scrolled past all of them.
+
+          Generated from `statePresentation`, so the key and the map cannot
+          disagree. Hand-written, they did: this described an overdue day with a
+          rose-500 swatch and the word `לא בוצע`, where the cell was #B9553D and
+          every other view called it `באיחור`. */}
+      <div className="flex flex-wrap items-center gap-x-4 gap-y-2 px-1 text-[11px] text-ink-muted">
+        {LEGEND_STATES.map(state => {
+          const p = statePresentation(state);
+          const Icon = STATE_ICONS[p.glyph];
+          return (
+            <span key={state} className="flex items-center gap-1.5">
+              <span
+                className={`w-3.5 h-3.5 rounded-full flex items-center justify-center ${p.dot}`}
+              >
+                <Icon className="w-2 h-2 text-white" strokeWidth={4} />
+              </span>
+              {p.label}
+            </span>
+          );
+        })}
+        <span className="flex items-center gap-1.5">
+          <span
+            className={`w-3.5 h-3.5 rounded-full flex items-center justify-center ${HANDED_ON.dot}`}
+          >
+            {React.createElement(STATE_ICONS[HANDED_ON.glyph], {
+              className: 'w-2 h-2 text-white',
+              strokeWidth: 4
+            })}
+          </span>
+          {HANDED_ON.label}
+        </span>
+        {canRearrange && (
+          <span className="flex items-center gap-1.5">
+            <span
+              className={`w-3.5 h-3.5 rounded-full flex items-center justify-center ${RELOCATED.dot}`}
+            >
+              <MOVED_ICON className="w-2 h-2 text-white" strokeWidth={4} />
+            </span>
+            {`${RELOCATED.moved} או ${RELOCATED.traded}`}
+          </span>
+        )}
+      </div>
+
+      <div className="bg-card border border-line rounded-3xl shadow-sm overflow-x-auto">
         <table className="w-full border-collapse text-center">
           <thead>
             <tr className="border-b border-[#E6E0D4]">
@@ -637,7 +698,7 @@ export function WeekOverview({
                 const isToday = day.toDateString() === todayStr;
                 const isSelected = day.toDateString() === selectedStr;
                 return (
-                  <th key={day.toDateString()} className="px-0.5 py-2 min-w-[36px]">
+                  <th key={day.toDateString()} className="px-0.5 py-2 min-w-[44px]">
                     <div
                       className={`flex flex-col items-center justify-center rounded-xl py-1 ${isSelected ? 'bg-[#A1C181] text-white shadow-sm' : 'text-[#8C7E6A]'}`}
                     >
@@ -730,55 +791,14 @@ export function WeekOverview({
         </table>
       </div>
 
+      {/* Faces, so a column of avatars can be read as names. */}
       <div className="flex flex-wrap items-center gap-x-4 gap-y-2 px-1">
         {legend.map(p => (
           <div key={p.id} className="flex items-center gap-1.5">
             <Avatar name={p.name} color={p.color} photoURL={p.photoURL} size="sm" />
-            <span className="text-xs font-medium text-[#8C7E6A]">{p.name}</span>
+            <span className="text-xs font-medium text-ink-muted">{p.name}</span>
           </div>
         ))}
-      </div>
-
-      {/* Generated from `statePresentation`, so the key and the map it explains
-          are the same data. Hand-written, it drifted: this described an overdue
-          day with a rose-500 swatch and the word `לא בוצע`, where the cell was
-          #B9553D and every other view called it `באיחור`. */}
-      <div className="flex flex-wrap items-center gap-x-4 gap-y-2 px-1 text-[11px] text-ink-muted">
-        {LEGEND_STATES.map(state => {
-          const p = statePresentation(state);
-          const Icon = STATE_ICONS[p.glyph];
-          return (
-            <span key={state} className="flex items-center gap-1.5">
-              <span
-                className={`w-3.5 h-3.5 rounded-full flex items-center justify-center ${p.dot}`}
-              >
-                <Icon className="w-2 h-2 text-white" strokeWidth={4} />
-              </span>
-              {p.label}
-            </span>
-          );
-        })}
-        <span className="flex items-center gap-1.5">
-          <span
-            className={`w-3.5 h-3.5 rounded-full flex items-center justify-center ${HANDED_ON.dot}`}
-          >
-            {React.createElement(STATE_ICONS[HANDED_ON.glyph], {
-              className: 'w-2 h-2 text-white',
-              strokeWidth: 4
-            })}
-          </span>
-          {HANDED_ON.label}
-        </span>
-        {canRearrange && (
-          <span className="flex items-center gap-1.5">
-            <span
-              className={`w-3.5 h-3.5 rounded-full flex items-center justify-center ${RELOCATED.dot}`}
-            >
-              <MOVED_ICON className="w-2 h-2 text-white" strokeWidth={4} />
-            </span>
-            {`${RELOCATED.moved} או ${RELOCATED.traded}`}
-          </span>
-        )}
       </div>
     </div>
   );

@@ -572,6 +572,83 @@ const ALL: ScheduleFilters = { choreIds: [], category: 'all', personId: 'all' };
   );
 }
 
+// --- Dragging reschedules work, it does not rewrite history ------------------
+
+{
+  // A source may be in the past - moving an unpaid debt forward is the main
+  // reason dragging exists - but a target may not. An occurrence used to be
+  // droppable onto a day that had already gone, and two past days could be
+  // traded with each other.
+  const week = weekAround(TUE);
+  const chore = makeChore({ frequency: 'daily' });
+  const tuesdayIndex = week.findIndex(d => dayKey(d) === dayKey(TUE));
+  const mondayIndex = week.findIndex(d => dayKey(d) === dayKey(MON));
+
+  const fromToday = dropTargets(chore, trio, week, tuesdayIndex, TUE);
+  assert.ok(fromToday.length > 0, 'today can still be moved somewhere');
+  for (const t of fromToday) {
+    assert.ok(
+      normalizeDay(week[t.index]).getTime() >= normalizeDay(TUE).getTime(),
+      'no target is a day that has already gone'
+    );
+  }
+
+  const fromOverdue = dropTargets(chore, trio, week, mondayIndex, TUE);
+  assert.ok(
+    fromOverdue.length > 0,
+    'an overdue day can still be picked up, which is the point of dragging'
+  );
+  assert.ok(
+    !fromOverdue.some(t => t.index === mondayIndex),
+    'and cannot be dropped on itself'
+  );
+  for (const t of fromOverdue) {
+    assert.ok(
+      normalizeDay(week[t.index]).getTime() >= normalizeDay(TUE).getTime(),
+      'a debt moves forward onto a day somebody can do it, never further back'
+    );
+  }
+}
+
+{
+  // Moving an occurrence off a day leaves a `movedTo` marker behind. The day
+  // then has no occurrence, so it resolves to `none` - and looked exactly like
+  // a day the chore never fell on, which made it read as free space in the
+  // grid while `dropTargets` silently refused every drop onto it.
+  const week = weekAround(TUE);
+  const wedIndex = week.findIndex(d => dayKey(d) === dayKey(WED));
+  const thu = shiftDays(WED, 1);
+  const thuIndex = week.findIndex(d => dayKey(d) === dayKey(thu));
+
+  const daily = makeChore({ frequency: 'daily' });
+  const afterMove = makeChore({
+    frequency: 'daily',
+    completions: withMovedOccurrence(daily, WED, thu, 'u1', TUE)
+  });
+
+  const vacated = buildScheduleCell(afterMove, trio, WED, 'all', TUE);
+  assert.equal(vacated.state, 'none', 'the day it left has no occurrence, as before');
+  assert.equal(
+    vacated.vacatedTo,
+    dayKey(thu),
+    'but it can now say where the occurrence went, so it need not look free'
+  );
+
+  const landed = buildScheduleCell(afterMove, trio, thu, 'all', TUE);
+  assert.equal(landed.movedFrom, dayKey(WED), 'and the day it landed on says where from');
+  assert.equal(landed.vacatedTo, null, 'a day holding an occurrence has not been vacated');
+
+  // The refusal itself is deliberate and stays; it is being drawn that changes.
+  const targets = dropTargets(afterMove, trio, week, thuIndex, TUE);
+  assert.ok(
+    !targets.some(t => t.index === wedIndex),
+    'the vacated day is still refused, because landing there would leave it both suppressed and relocated onto'
+  );
+
+  const plain = buildScheduleCell(daily, trio, WED, 'all', TUE);
+  assert.equal(plain.vacatedTo, null, 'a day with a live occurrence reports no vacancy');
+}
+
 // --- How a state looks ------------------------------------------------------
 //
 // One table decides this for every view, so these assert the distinctions a

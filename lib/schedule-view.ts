@@ -51,6 +51,16 @@ export type ScheduleCell = {
   /** True when the resident on duty was chosen by a move or a swap rather than
    *  by the queue, so the grid can say why it is not whose turn it looks like. */
   rearranged: boolean;
+  /**
+   * The day this occurrence left for, when it was moved off this one.
+   *
+   * Such a day has no occurrence, so it resolves to `none` - and looked exactly
+   * like a day the chore never fell on. It is not free space: `dropTargets`
+   * refuses it, deliberately, because landing there would leave the same day
+   * both suppressed and relocated onto. The grid needs to be able to say so
+   * rather than accept a drag and silently drop it.
+   */
+  vacatedTo: string | null;
 };
 
 export type ScheduleRow = {
@@ -216,19 +226,22 @@ export type ScheduleFilters = {
 
 export const ALL_TASKS: ScheduleFilters = { choreIds: [], category: 'all', personId: 'all' };
 
-const emptyCell = (day: Date): ScheduleCell => ({
+const emptyCell = (day: Date, vacatedTo: string | null = null): ScheduleCell => ({
   day,
   key: dayKey(day),
   state: 'none',
   assignment: null,
   userId: null,
   movedFrom: null,
-  rearranged: false
+  rearranged: false,
+  vacatedTo
 });
 
 const provenance = (assignment: DayAssignment) => ({
   movedFrom: assignment.movedFrom,
-  rearranged: !!assignment.assignedTo
+  rearranged: !!assignment.assignedTo,
+  // A day that still has an occurrence has not been vacated of one.
+  vacatedTo: null
 });
 
 export const buildScheduleCell = (
@@ -238,7 +251,11 @@ export const buildScheduleCell = (
   personId: string | 'all',
   today: Date
 ): ScheduleCell => {
-  if (!choreOccursOnDate(chore, day, today)) return emptyCell(day);
+  if (!choreOccursOnDate(chore, day, today)) {
+    // A day with nothing on it and a day whose occurrence was moved away both
+    // resolve to `none`, and only one of them is free space.
+    return emptyCell(day, getDayRecord(chore, day)?.movedTo ?? null);
+  }
 
   const assignment = resolveDayAssignee(chore, users, day, today);
   const userId = assignment.userId ?? null;
@@ -341,16 +358,29 @@ export const dropTargets = (
   if (!source || !isPickable(source)) return [];
 
   const start = choreStartDate(chore);
+  const startTime = start?.getTime();
+  // Rescheduling work, not rewriting history.
+  //
+  // Picking a past day *up* is correct and stays: `isPickable` allows
+  // `overdue`, and moving an unpaid debt forward onto a day somebody can
+  // actually do it is the main reason dragging exists. It is only the target
+  // side that needs a floor. Without one an occurrence could be dropped onto a
+  // day that had already gone, and two past days could be traded with each
+  // other - neither of which resolves anything.
+  const floor = normalizeDay(today).getTime();
   const targets: DropTarget[] = [];
 
   for (const [index, cell] of cells.entries()) {
     if (index === sourceIndex) continue;
+    const dayTime = normalizeDay(cell.day).getTime();
     // The chore did not exist yet, so it cannot have been due then.
-    if (start && normalizeDay(cell.day).getTime() < start.getTime()) continue;
+    if (startTime !== undefined && dayTime < startTime) continue;
+    if (dayTime < floor) continue;
 
     if (cell.state === 'none') {
       // A day whose own occurrence was moved away also reads as empty. Landing
-      // on it would leave the same day both suppressed and relocated onto.
+      // on it would leave the same day both suppressed and relocated onto, so
+      // it is refused here and drawn as occupied - see `vacatedTo`.
       if (!getDayRecord(chore, cell.day)) targets.push({ index, kind: 'move' });
       continue;
     }
