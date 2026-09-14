@@ -2242,15 +2242,22 @@ export default function ChoresApp() {
                   initial={{ opacity: 0, y: 10 }}
                   animate={{ opacity: 1, y: 0 }}
                   key={chore.id}
-                  className={`p-5 rounded-3xl border transition-all ${presentation.surface}`}
+                  className={`p-4 rounded-3xl border transition-all ${presentation.surface}`}
                 >
-                  <div className="flex justify-between items-start mb-4">
-                    {/* Yields width to the assignee chip: the badges below are
-                        wide enough to starve it otherwise, and a wrapped task
-                        title beats a cropped face. */}
-                    <div className="min-w-0 flex-1">
+                  <div className="mb-3">
+                    {/* The task name is the header, so it gets its own line.
+                        Sharing one with the assignee chip meant competing with
+                        a "תור:" label, up to five avatars and an untruncated
+                        name, none of which shrink - so the title was the only
+                        thing that could give way, and a resident with a long
+                        name cropped it to a single letter. It wraps rather than
+                        truncates now: the one thing a card has to say is which
+                        chore it is. */}
+                    <div>
                       <div className="flex items-center gap-2 flex-wrap">
-                        <h3 className={`text-lg font-bold ${done ? 'text-ink-mid' : 'text-ink'}`}>
+                        <h3
+                          className={`text-lg font-bold break-words ${done ? 'text-ink-mid' : 'text-ink'}`}
+                        >
                           {chore.name}
                         </h3>
                         {/* The state in one word, from the same table the week
@@ -2333,15 +2340,18 @@ export default function ChoresApp() {
                         )}
                       </p>
                     </div>
+                    {/* Whose turn it is, on the row below the name rather than
+                        beside it. Nothing here has to be truncated at this
+                        width, which is the point of moving it. */}
                     {unavailable ? (
-                      <div className="flex items-center gap-2 px-3 py-1.5 rounded-full bg-[#F1ECE3] text-[#8C7E6A]">
+                      <div className="mt-2 inline-flex items-center gap-2 px-3 py-1 rounded-full bg-inset text-ink-muted">
                         <UserX className="w-4 h-4 flex-shrink-0" />
                         <span className="text-sm font-bold">אף אחד לא פנוי</span>
                       </div>
                     ) : assignee && (
-                      <div className={`flex flex-col items-end gap-1`}>
+                      <div className={`mt-2 flex items-center`}>
                         {chore.rotation && chore.rotation.length > 1 ? (
-                          <div className={`flex items-center gap-1.5 px-3 py-1.5 rounded-3xl ${done ? '' : 'bg-[#F3EFE9]'}`}>
+                          <div className={`flex items-center gap-1.5 px-3 py-1 rounded-3xl min-w-0 ${done ? '' : 'bg-[#F3EFE9]'}`}>
                             <span className="text-[10px] font-bold text-[#8C7E6A] ml-1">תור:</span>
                             <div className="flex items-center" dir="ltr">
                               {(() => {
@@ -2372,12 +2382,12 @@ export default function ChoresApp() {
                                 });
                               })()}
                             </div>
-                            <span className="text-base font-extrabold text-[#3D3732] mr-2 border-r border-[#DED8CE] pr-2">
+                            <span className="text-sm font-extrabold text-ink mr-2 border-r border-line-strong pr-2 truncate">
                               {assignee.id === currentUserId ? 'התור שלך' : assignee.name}
                             </span>
                           </div>
                         ) : (
-                          <div className={`flex items-center gap-2 px-3 py-1.5 rounded-full ${done ? '' : 'bg-[#F3EFE9]'}`}>
+                          <div className={`flex items-center gap-2 px-3 py-1 rounded-full min-w-0 ${done ? '' : 'bg-[#F3EFE9]'}`}>
                             <Avatar
                               name={assignee.name}
                               color={assignee.color}
@@ -2385,7 +2395,7 @@ export default function ChoresApp() {
                               size="md"
                               title={assignee.name}
                             />
-                            <span className="text-base font-extrabold text-[#3D3732]">
+                            <span className="text-sm font-extrabold text-ink truncate">
                               {assignee.id === currentUserId ? 'התור שלך' : assignee.name}
                             </span>
                           </div>

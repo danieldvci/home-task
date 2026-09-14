@@ -34,6 +34,24 @@ The toast helper already exists as `showToast` in `components/Toast.tsx`.
 
 ## Fixed
 
+### A long resident name cropped the task name off the card — fixed 2026-09-14
+
+The day-list card header was one flex row holding the task name and the assignee
+chip. The chip carries a `תור:` label, up to five avatars and a name, none of
+which can shrink, and only the name block had `min-w-0` — so the title was the
+only thing in the row that could give way. A household with a resident called
+"Amaranta Cohen" saw a card whose heading was a single letter, which left the
+card unable to say which chore it was.
+
+The task name now has its own full-width line and wraps rather than truncates,
+and the assignee moved to the row below it. The chip's width cannot reach the
+title at all now, so no name length or rotation size can reproduce this.
+
+The same inversion was in the complete, skip and swap dialogs, where a generic
+question ("סיימת את המשימה?") was the heading and the task name was the
+smallest, faintest text on screen — three dialogs that opened identically. The
+task name is the heading in each, and the question is the line beneath it.
+
 ### A day can be dragged into the past — fixed 2026-09-08
 
 `dropTargets` in `lib/schedule-view.ts` only rejected days before the chore's
