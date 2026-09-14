@@ -2057,15 +2057,6 @@ export default function ChoresApp() {
             })}
           </div>
 
-          {/* Task filter, shared by both views */}
-          <MultiSelectFilter
-            options={taskFilterOptions}
-            selectedIds={choreFilterIds}
-            onChange={setChoreFilterIds}
-            allLabel="כל המשימות בבית"
-            countNoun="משימות"
-          />
-
           {/* Category Filter, shared by both views */}
           {chores.some(c => c.category) && (
             <div className="flex gap-2 overflow-x-auto pb-1 no-scrollbar">
@@ -2087,17 +2078,38 @@ export default function ChoresApp() {
             </div>
           )}
 
-          {/* Day / Week view toggle */}
-          <div className="flex bg-[#F1ECE3] border border-[#E6E0D4] rounded-2xl p-1">
-            {([['day', 'יום'], ['week', 'שבוע']] as const).map(([view, label]) => (
-              <button
-                key={view}
-                onClick={() => setTasksView(view)}
-                className={`flex-1 py-2 rounded-xl text-sm font-bold transition-all ${tasksView === view ? 'bg-white text-[#3D3732] shadow-sm' : 'text-[#8C7E6A] hover:text-[#4A443F]'}`}
-              >
-                {label}
-              </button>
-            ))}
+          {/* Which tasks, and over what span, on one row. The toggle spanned
+              the full width to no purpose - two words do not need 350px - and
+              the row it owned cost more screen than the control did. Both stay
+              fully visible at every width, which is the difference between
+              this and folding a filter into a neighbour's overflow.
+
+              The toggle stays last, next to the day list or grid it switches. */}
+          <div className="flex items-stretch gap-2">
+            <MultiSelectFilter
+              className="flex-1 min-w-0"
+              options={taskFilterOptions}
+              selectedIds={choreFilterIds}
+              onChange={setChoreFilterIds}
+              allLabel="כל המשימות בבית"
+              countNoun="משימות"
+            />
+            <div
+              role="group"
+              aria-label="טווח התצוגה"
+              className="flex flex-shrink-0 bg-[#F1ECE3] border border-[#E6E0D4] rounded-2xl p-1"
+            >
+              {([['day', 'יום'], ['week', 'שבוע']] as const).map(([view, label]) => (
+                <button
+                  key={view}
+                  onClick={() => setTasksView(view)}
+                  aria-pressed={tasksView === view}
+                  className={`px-4 rounded-xl text-sm font-bold transition-all ${tasksView === view ? 'bg-white text-[#3D3732] shadow-sm' : 'text-[#8C7E6A] hover:text-[#4A443F]'}`}
+                >
+                  {label}
+                </button>
+              ))}
+            </div>
           </div>
         </div>
 
