@@ -32,29 +32,75 @@ inline on the offending field (`role="alert"`, red border, `aria-invalid`),
 move focus there, and repeat it in a toast for anyone who has scrolled past.
 The toast helper already exists as `showToast` in `components/Toast.tsx`.
 
-### A day can be dragged into the past — reported 2026-09-07
+## Fixed
 
-`dropTargets` in `lib/schedule-view.ts` only rejects days before the chore's
-`startDate`, so an occurrence can be dropped onto a day that has already gone,
-and two past days can be traded with each other. Neither resolves anything; it
-rewrites history instead of rescheduling work.
+### A long resident name cropped the task name off the card — fixed 2026-09-14
 
-Picking a past day *up* is correct and must stay. `isPickable` allows `overdue`,
-and moving an unpaid debt forward to a day somebody can actually do it is the
-main reason dragging exists. It is only the target side that needs a bound:
-sources may be overdue, targets should be today or later.
+The day-list card header was one flex row holding the task name and the assignee
+chip. The chip carries a `תור:` label, up to five avatars and a name, none of
+which can shrink, and only the name block had `min-w-0` — so the title was the
+only thing in the row that could give way. A household with a resident called
+"Amaranta Cohen" saw a card whose heading was a single letter, which left the
+card unable to say which chore it was.
 
-### A day vacated by a move never accepts a drop again — reported 2026-09-07
+The task name now has its own full-width line and wraps rather than truncates,
+and the assignee moved to the row below it. The chip's width cannot reach the
+title at all now, so no name length or rotation size can reproduce this.
+
+The same inversion was in the complete, skip and swap dialogs, where a generic
+question ("סיימת את המשימה?") was the heading and the task name was the
+smallest, faintest text on screen — three dialogs that opened identically. The
+task name is the heading in each, and the question is the line beneath it.
+
+### A day can be dragged into the past — fixed 2026-09-08
+
+`dropTargets` in `lib/schedule-view.ts` only rejected days before the chore's
+`startDate`, so an occurrence could be dropped onto a day that had already gone,
+and two past days could be traded with each other. Neither resolved anything; it
+rewrote history instead of rescheduling work.
+
+Targets are now floored at today. Picking a past day *up* is unchanged, and had
+to be: `isPickable` allows `overdue`, and moving an unpaid debt forward onto a
+day somebody can actually do it is the main reason dragging exists. Sources may
+be overdue, targets may not.
+
+### A day vacated by a move never accepts a drop again — fixed 2026-09-08
 
 Moving an occurrence off a day leaves a `movedTo` record behind on it. The day
 then resolves to `state: 'none'`, but the empty-day branch of `dropTargets`
-requires `!getDayRecord(chore, cell.day)`, so it is never offered as a target
-again. It looks like free space in the grid and silently refuses every drop.
+requires `!getDayRecord(chore, cell.day)`, so it was never offered as a target
+again — it looked like free space in the grid and silently refused every drop.
 
-The guard itself is deliberate — landing there would leave the same day both
-suppressed and relocated onto. The fix is to let the drop clear the old
-relocation, or to mark the day so it does not read as free.
+Fixed the second of the two ways suggested: the day now says it is occupied
+rather than pretending to be free. `ScheduleCell` carries `vacatedTo`, and the
+grid draws such a day with the relocation glyph instead of the dot it shares
+with genuinely empty days. The refusal itself was deliberate and stays, because
+landing there would leave the same day both suppressed and relocated onto.
 
-## Fixed
+### The week grid's legend disagreed with the week grid — fixed 2026-09-08
 
-_(none yet)_
+The legend was written out beside the map it explained rather than generated
+from it, so it drifted: it drew an overdue day as `bg-rose-500` where the cell
+was `#B9553D`, and called it `לא בוצע` where the grid's own tooltip said
+`ממתין` and the day list said `באיחור`. Three vocabularies for six states.
+
+Both now resolve through `statePresentation` in `lib/schedule-view.ts`, and the
+legend is generated from the same table, so a divergence has to be introduced
+in one place to exist at all.
+
+### A refusal that could not be asked why — fixed 2026-09-08
+
+`AdminHint` explained an owner-only control through a `title`, but the controls
+it wraps carry `disabled:pointer-events-none`, and a phone has no hover at all —
+so a member saw a row of greyed-out controls with no way to find out why. The
+wrapper now takes the tap and answers with a toast.
+
+### A completion could be backdated by leaving the tab open — fixed 2026-09-08
+
+Every action writes to the day being viewed, and the selected day was held as a
+date. A tab left open overnight stayed pinned to a yesterday that had quietly
+become overdue, while the day strip re-anchored around the new today — so the
+first tap the next morning recorded a completion against the wrong day.
+
+The selection now follows today unless the user picked a day, and the day being
+acted on is named in a sticky heading that turns amber when it is not today.

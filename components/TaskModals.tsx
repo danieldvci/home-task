@@ -203,10 +203,14 @@ export function DoneConfirmModal({ choreName, busy, onConfirm, onCancel }: Props
         animate={{ opacity: 1, y: 0 }}
         className="w-full max-w-md bg-white rounded-3xl border border-[#E6E0D4] shadow-xl p-5 flex flex-col gap-4"
       >
+        {/* The task is the heading, and what is being asked about it is the
+            line underneath. The other way round, every one of these dialogs
+            opened with the same generic question and put the only thing that
+            distinguished them in the smallest, faintest text on screen. */}
         <div className="flex items-start justify-between gap-3">
-          <div>
-            <h3 className="text-lg font-extrabold text-[#3D3732]">סיימת את המשימה?</h3>
-            <p className="text-sm text-[#8C7E6A] mt-1">{choreName}</p>
+          <div className="min-w-0">
+            <h3 className="text-lg font-extrabold text-[#3D3732] break-words">{choreName}</h3>
+            <p className="text-sm text-[#8C7E6A] mt-1">לסמן כבוצע?</p>
           </div>
           <button
             type="button"
@@ -483,9 +487,12 @@ export function SkipConfirmModal({ choreName, busy, onConfirm, onCancel }: SkipP
         animate={{ opacity: 1, y: 0 }}
         className="w-full max-w-md bg-white rounded-3xl border border-[#E6E0D4] shadow-xl p-5 flex flex-col gap-4"
       >
-        <h3 className="text-lg font-extrabold text-[#3D3732]">לדלג על המשימה?</h3>
+        <div className="min-w-0">
+          <h3 className="text-lg font-extrabold text-[#3D3732] break-words">{choreName}</h3>
+          <p className="text-sm text-[#8C7E6A] mt-1">להעביר לתור הבא?</p>
+        </div>
         <p className="text-sm text-[#6B5E4C]">
-          המשימה <span className="font-bold">{choreName}</span> תועבר לתור הבא (למשל אם היא קשה או לא רלוונטית היום).
+          המשימה תועבר לתור הבא (למשל אם היא קשה או לא רלוונטית היום), והיום עצמו עוד פתוח.
         </p>
         <div className="flex gap-2">
           <button
@@ -531,9 +538,9 @@ export function SwapTurnModal({ choreName, candidates, busy, onConfirm, onCancel
         className="w-full max-w-md bg-white rounded-3xl border border-[#E6E0D4] shadow-xl p-5 flex flex-col gap-4"
       >
         <div className="flex items-start justify-between gap-3">
-          <div>
-            <h3 className="text-lg font-extrabold text-[#3D3732]">להחליף תור?</h3>
-            <p className="text-sm text-[#8C7E6A] mt-1">{choreName}</p>
+          <div className="min-w-0">
+            <h3 className="text-lg font-extrabold text-[#3D3732] break-words">{choreName}</h3>
+            <p className="text-sm text-[#8C7E6A] mt-1">להחליף תור עם מי?</p>
           </div>
           <button
             type="button"

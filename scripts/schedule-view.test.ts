@@ -1,14 +1,17 @@
 import assert from 'node:assert/strict';
 import {
+  HANDED_ON,
   MISSED_LOOKBACK_DAYS,
   buildScheduleCell,
   buildScheduleRows,
   carryOverLabel,
   dayStripDays,
   dropTargets,
+  isHandedOn,
   isPickable,
   missedOccurrences,
   relativeDayLabel,
+  statePresentation,
   weekAround,
   shiftDays
 } from '../lib/schedule-view';
@@ -566,6 +569,278 @@ const ALL: ScheduleFilters = { choreIds: [], category: 'all', personId: 'all' };
     carryOverLabel(slippedThrice, TUE),
     'נדחה 3 פעמים',
     'repeated slips are counted, since that is the thing worth noticing'
+  );
+}
+
+// --- Dragging reschedules work, it does not rewrite history ------------------
+
+{
+  // A source may be in the past - moving an unpaid debt forward is the main
+  // reason dragging exists - but a target may not. An occurrence used to be
+  // droppable onto a day that had already gone, and two past days could be
+  // traded with each other.
+  const week = weekAround(TUE);
+  const chore = makeChore({ frequency: 'daily' });
+  const tuesdayIndex = week.findIndex(d => dayKey(d) === dayKey(TUE));
+  const mondayIndex = week.findIndex(d => dayKey(d) === dayKey(MON));
+
+  const fromToday = dropTargets(chore, trio, week, tuesdayIndex, TUE);
+  assert.ok(fromToday.length > 0, 'today can still be moved somewhere');
+  for (const t of fromToday) {
+    assert.ok(
+      normalizeDay(week[t.index]).getTime() >= normalizeDay(TUE).getTime(),
+      'no target is a day that has already gone'
+    );
+  }
+
+  const fromOverdue = dropTargets(chore, trio, week, mondayIndex, TUE);
+  assert.ok(
+    fromOverdue.length > 0,
+    'an overdue day can still be picked up, which is the point of dragging'
+  );
+  assert.ok(
+    !fromOverdue.some(t => t.index === mondayIndex),
+    'and cannot be dropped on itself'
+  );
+  for (const t of fromOverdue) {
+    assert.ok(
+      normalizeDay(week[t.index]).getTime() >= normalizeDay(TUE).getTime(),
+      'a debt moves forward onto a day somebody can do it, never further back'
+    );
+  }
+}
+
+{
+  // Moving an occurrence off a day leaves a `movedTo` marker behind. The day
+  // then has no occurrence, so it resolves to `none` - and looked exactly like
+  // a day the chore never fell on, which made it read as free space in the
+  // grid while `dropTargets` silently refused every drop onto it.
+  const week = weekAround(TUE);
+  const wedIndex = week.findIndex(d => dayKey(d) === dayKey(WED));
+  const thu = shiftDays(WED, 1);
+  const thuIndex = week.findIndex(d => dayKey(d) === dayKey(thu));
+
+  const daily = makeChore({ frequency: 'daily' });
+  const afterMove = makeChore({
+    frequency: 'daily',
+    completions: withMovedOccurrence(daily, WED, thu, 'u1', TUE)
+  });
+
+  const vacated = buildScheduleCell(afterMove, trio, WED, 'all', TUE);
+  assert.equal(vacated.state, 'none', 'the day it left has no occurrence, as before');
+  assert.equal(
+    vacated.vacatedTo,
+    dayKey(thu),
+    'but it can now say where the occurrence went, so it need not look free'
+  );
+
+  const landed = buildScheduleCell(afterMove, trio, thu, 'all', TUE);
+  assert.equal(landed.movedFrom, dayKey(WED), 'and the day it landed on says where from');
+  assert.equal(landed.vacatedTo, null, 'a day holding an occurrence has not been vacated');
+
+  // The refusal itself is deliberate and stays; it is being drawn that changes.
+  const targets = dropTargets(afterMove, trio, week, thuIndex, TUE);
+  assert.ok(
+    !targets.some(t => t.index === wedIndex),
+    'the vacated day is still refused, because landing there would leave it both suppressed and relocated onto'
+  );
+
+  const plain = buildScheduleCell(daily, trio, WED, 'all', TUE);
+  assert.equal(plain.vacatedTo, null, 'a day with a live occurrence reports no vacancy');
+}
+
+// --- How a state looks ------------------------------------------------------
+//
+// One table decides this for every view, so these assert the distinctions a
+// resident has to be able to make at a glance. Each was a real confusion: the
+// four blocks below are the four ways the old per-view styling lied.
+
+{
+  // `open` was styled byte-identically to `none`, so the state that describes
+  // almost every card carried no signal at all.
+  const open = statePresentation('open');
+  const none = statePresentation('none');
+  assert.notEqual(open.surface, none.surface, 'a task to do does not look like a day off');
+  assert.notEqual(open.glyph, none.glyph, 'and says so by shape, not only by tint');
+  assert.equal(open.owed, true, 'an open day is owed');
+}
+
+{
+  // `cancelled` and `unavailable` shared a surface while meaning opposite
+  // things: one is a decision somebody made, the other is the app reporting it
+  // has nobody to ask.
+  const cancelled = statePresentation('cancelled');
+  const unavailable = statePresentation('unavailable');
+  assert.notEqual(
+    cancelled.surface,
+    unavailable.surface,
+    'writing a day off does not look like having nobody to give it to'
+  );
+  assert.notEqual(cancelled.glyph, unavailable.glyph, 'and differs by shape too');
+  assert.equal(cancelled.settled, true, 'a written-off day is settled');
+  assert.equal(
+    unavailable.owed,
+    false,
+    'an unavailable day is owed by nobody, so it must not read as a debt'
+  );
+  assert.equal(
+    unavailable.settled,
+    false,
+    'but it is not settled either - nothing about it was decided'
+  );
+}
+
+{
+  // Settled versus owed is the first distinction the eye should make, so it is
+  // the one thing every caller can branch on without knowing the state names.
+  const settled = (['done', 'cancelled'] as const).map(s => statePresentation(s).settled);
+  assert.deepEqual(settled, [true, true], 'done and written off are the settled pair');
+  const owed = (['open', 'overdue'] as const).map(s => statePresentation(s).owed);
+  assert.deepEqual(owed, [true, true], 'open and overdue are the owed pair');
+}
+
+{
+  // A skip hands the turn on and leaves the day owed, so it is a modifier on a
+  // state rather than a state. It used to be the faintest text on the card and
+  // was absent from the grid entirely.
+  const skipped = makeChore({
+    completions: { [dayKey(TUE)]: { userId: 'u1', at: TUE.toISOString(), skipped: true } },
+    currentIndex: 1
+  });
+
+  const today = buildScheduleCell(skipped, trio, TUE, 'all', TUE);
+  assert.equal(today.state, 'open', 'a skipped day is still open, because it is still owed');
+  assert.equal(isHandedOn(today), true, 'and is drawable as handed on');
+
+  const yesterday = buildScheduleCell(
+    makeChore({
+      completions: { [dayKey(MON)]: { userId: 'u1', at: MON.toISOString(), skipped: true } },
+      currentIndex: 1
+    }),
+    trio,
+    MON,
+    'all',
+    TUE
+  );
+  assert.equal(yesterday.state, 'overdue', 'a skipped day that has passed is late as well');
+  assert.equal(
+    isHandedOn(yesterday),
+    true,
+    'being late does not stop it having been handed on - the card needs to say both'
+  );
+
+  const done = buildScheduleCell(
+    makeChore({ completions: { [dayKey(TUE)]: { userId: 'u1', at: TUE.toISOString() } } }),
+    trio,
+    TUE,
+    'all',
+    TUE
+  );
+  assert.equal(isHandedOn(done), false, 'a finished day was not handed to anybody');
+}
+
+{
+  // Every state needs a label and a glyph, or a view will quietly fall back to
+  // inventing its own vocabulary - which is how the grid's legend came to
+  // disagree with the grid.
+  const states = ['none', 'open', 'overdue', 'done', 'cancelled', 'unavailable'] as const;
+  const labels = states.map(s => statePresentation(s).label);
+  assert.equal(new Set(labels).size, states.length, 'every state has its own words');
+  for (const s of states) {
+    const p = statePresentation(s);
+    assert.ok(p.label.length > 0, `${s} has a label`);
+    assert.ok(p.surface.length > 0 && p.badge.length > 0 && p.dot.length > 0, `${s} is drawable`);
+    assert.equal(p.settled && p.owed, false, `${s} cannot be both settled and owed`);
+  }
+  assert.notEqual(
+    HANDED_ON.label,
+    statePresentation('open').label,
+    'handing a turn on is its own thing to say'
+  );
+}
+
+{
+  // A lookup, not a constructor: this runs once per rendered cell and a week
+  // grid is chores times seven cells wide.
+  assert.equal(
+    statePresentation('overdue'),
+    statePresentation('overdue'),
+    'the same state resolves to the very same object, allocating nothing'
+  );
+}
+
+// --- What a pass over the schedule is allowed to cost -----------------------
+//
+// Resolving one cell walks the calendar from today to the day in question and
+// consults the rotation at every occurrence on the way. That made the cost of a
+// week grid proportional to the size of the household as well, because each
+// consultation searched the resident array. It is a lookup, so these assert it
+// is one: `Residents` accepts an index, every entry point builds it at most
+// once per pass, and a household that grows does not make the grid slower per
+// resident.
+//
+// A budget nobody checks is a wish, which is why this counts rather than times.
+
+class CountingIndex extends Map<string, RotationUser> {
+  lookups = 0;
+  override get(id: string) {
+    this.lookups++;
+    return super.get(id);
+  }
+}
+
+const countingTrio = () => new CountingIndex(trio.map(u => [u.id, u] as const));
+
+{
+  // The index is handed through, not rebuilt. Were any layer to call
+  // `indexUsers` on an array it had made itself, the count below would be zero
+  // because the copy would absorb the lookups.
+  const index = countingTrio();
+  const rows = buildScheduleRows([makeChore()], index, weekAround(TUE), ALL, TUE);
+  assert.equal(rows.length, 1, 'a daily chore occupies the whole week');
+  assert.ok(
+    index.lookups > 0,
+    'the index the caller passed is the one consulted, not a copy of it'
+  );
+}
+
+{
+  // The same schedule, asked for through both shapes, has to agree. Accepting
+  // two shapes is only safe while it cannot change an answer.
+  const week = weekAround(TUE);
+  const chore = makeChore({
+    completions: { [dayKey(MON)]: { userId: 'u1', at: MON.toISOString() } }
+  });
+  const viaArray = buildScheduleRows([chore], trio, week, ALL, TUE);
+  const viaIndex = buildScheduleRows([chore], countingTrio(), week, ALL, TUE);
+  assert.deepEqual(
+    viaIndex[0].cells.map(c => [c.state, c.userId]),
+    viaArray[0].cells.map(c => [c.state, c.userId]),
+    'an array and an index describe the same week'
+  );
+}
+
+{
+  // The budget itself. Lookups should scale with the work — cells, and the
+  // occurrences each cell walks past — and not with the number of residents,
+  // which is the factor the array search added.
+  const week = weekAround(TUE);
+  const chores = Array.from({ length: 10 }, (_, i) => makeChore({ id: `c${i}` }));
+
+  const small = new CountingIndex(trio.map(u => [u.id, u] as const));
+  buildScheduleRows(chores, small, week, ALL, TUE);
+
+  const crowd = Array.from({ length: 12 }, (_, i) => present(`x${i}`));
+  const large = new CountingIndex(
+    [...trio, ...crowd].map(u => [u.id, u] as const)
+  );
+  buildScheduleRows(chores, large, week, ALL, TUE);
+
+  assert.ok(small.lookups > 0, 'the grid does consult the rotation, so this measures something');
+  assert.equal(
+    large.lookups,
+    small.lookups,
+    'quadrupling the household does not cost the grid a single extra lookup'
   );
 }
 

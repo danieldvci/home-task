@@ -74,6 +74,30 @@ export type RotationUser = {
   absentUntil?: string | null;
 };
 
+/**
+ * Residents by id, for the walks below.
+ *
+ * Resolving one day projects the rotation forward one occurrence at a time, and
+ * every step asks who holds a slot. Looking that up in an array made the cost
+ * of a cell proportional to the size of the household as well as to the length
+ * of the walk, for no reason: the answer is a lookup.
+ *
+ * Every entry point accepts either shape, so callers with an array they already
+ * have keep working and a caller resolving many cells can build the index once
+ * and hand the same one to all of them.
+ */
+export type UserIndex = ReadonlyMap<string, RotationUser>;
+export type Residents = RotationUser[] | UserIndex;
+
+export const indexUsers = (users: Residents): UserIndex =>
+  Array.isArray(users) ? new Map(users.map(u => [u.id, u])) : users;
+
+const residentById = (users: Residents, id?: string) =>
+  id === undefined ? undefined : Array.isArray(users) ? users.find(u => u.id === id) : users.get(id);
+
+/** True when somebody with this id is still a resident of the household. */
+export const isResident = (users: Residents, id?: string) => !!residentById(users, id);
+
 export const normalizeDay = (d: Date) => {
   const nd = new Date(d);
   nd.setHours(0, 0, 0, 0);
@@ -253,7 +277,7 @@ const wrap = (index: number, length: number) => ((index % length) + length) % le
 
 export const getActiveAssigneeIndex = (
   chore: Chore,
-  users: RotationUser[],
+  users: Residents,
   startIndex: number,
   onDay: Date
 ) => {
@@ -262,7 +286,7 @@ export const getActiveAssigneeIndex = (
   const start = wrap(startIndex, len);
   for (let i = 0; i < len; i++) {
     const checkIndex = (start + i) % len;
-    const user = users.find(u => u.id === chore.rotation[checkIndex]);
+    const user = residentById(users, chore.rotation[checkIndex]);
     if (user && !isUserAbsentOnDay(user, onDay)) return checkIndex;
   }
   return start;
@@ -270,7 +294,7 @@ export const getActiveAssigneeIndex = (
 
 export const getNextActiveIndex = (
   chore: Chore,
-  users: RotationUser[],
+  users: Residents,
   fromIndex: number,
   onDay: Date
 ) => {
@@ -281,7 +305,7 @@ export const getNextActiveIndex = (
 
 export const getPrevActiveIndex = (
   chore: Chore,
-  users: RotationUser[],
+  users: Residents,
   fromIndex: number,
   onDay: Date
 ) => {
@@ -289,7 +313,7 @@ export const getPrevActiveIndex = (
   if (len === 0) return 0;
   for (let i = 1; i <= len; i++) {
     const checkIndex = wrap(fromIndex - i, len);
-    const user = users.find(u => u.id === chore.rotation[checkIndex]);
+    const user = residentById(users, chore.rotation[checkIndex]);
     if (user && !isUserAbsentOnDay(user, onDay)) return checkIndex;
   }
   return wrap(fromIndex - 1, len);
@@ -614,13 +638,15 @@ export const completionMarkers = (completions: Record<string, ChoreCompletion>) 
 // `currentIndex` meaning "the next open occurrence" after a completion.
 export const projectAssigneeIndex = (
   chore: Chore,
-  users: RotationUser[],
+  residents: Residents,
   startIndex: number,
   fromDay: Date,
   toDay: Date
 ) => {
   const len = chore.rotation?.length ?? 0;
   if (len === 0) return -1;
+  // Indexed once for the whole walk rather than per occurrence.
+  const users = indexUsers(residents);
   const forward = normalizeDay(fromDay).getTime() <= normalizeDay(toDay).getTime();
   let index = -1;
 
@@ -667,11 +693,11 @@ export const projectAssigneeIndex = (
  * still lands on someone, so callers have to check this to avoid presenting an
  * absent resident as the assignee.
  */
-export const isEveryoneAwayOnDay = (chore: Chore, users: RotationUser[], day: Date) => {
+export const isEveryoneAwayOnDay = (chore: Chore, users: Residents, day: Date) => {
   const rotation = chore.rotation ?? [];
   if (rotation.length === 0) return false;
   return rotation.every(id => {
-    const user = users.find(u => u.id === id);
+    const user = residentById(users, id);
     return !user || isUserAbsentOnDay(user, day);
   });
 };
@@ -704,10 +730,13 @@ export type DayAssignment = {
 // The single entry point for "who owns this chore on this day".
 export const resolveDayAssignee = (
   chore: Chore,
-  users: RotationUser[],
+  residents: Residents,
   day: Date,
   today: Date = new Date()
 ): DayAssignment => {
+  // One index for this cell, shared by the projection walk and the absence
+  // check below, so neither rebuilds it.
+  const users = indexUsers(residents);
   const record = getDayRecord(chore, day);
   const completion = record && isCompletedRecord(record) ? record : null;
   const rearrangement = {

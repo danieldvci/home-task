@@ -1,6 +1,6 @@
 'use client';
 
-import React, { useState, useEffect, useRef, useSyncExternalStore } from 'react';
+import React, { useState, useEffect, useMemo, useRef, useSyncExternalStore } from 'react';
 import { 
   CheckCircle2, 
   FastForward, 
@@ -67,17 +67,22 @@ import {
   busiestDay
 } from '../lib/activity-stats';
 import {
-  ALL_TASKS,
   DEFAULT_CATEGORY,
+  HANDED_ON,
+  RELOCATED,
   buildScheduleRows,
   carryOverLabel,
   dayStripDays,
   dropTargets,
+  isHandedOn,
   missedOccurrences,
+  relativeDayLabel,
   shiftDays,
+  statePresentation,
   weekAround
 } from '../lib/schedule-view';
 import type { CellState, DropKind, ScheduleFilters } from '../lib/schedule-view';
+import { MOVED_ICON, STATE_ICONS, TRADED_ICON } from '../components/state-icons';
 import { householdDisplayName, profileStorageKey } from '../lib/household-utils';
 import { describeAuthError } from '../lib/auth-errors';
 import { describeChoreChanges, frequencyLabel, joinDetails, clampDetails } from '../lib/activity';
@@ -89,6 +94,7 @@ import {
   completionMarkers,
   currentIndexAfterUndo,
   dayKey,
+  dayKeyToDate,
   getChoreHealth,
   getNextActiveIndex,
   isUserAbsentNow,
@@ -111,22 +117,11 @@ import {
 } from '../lib/notifications';
 import { BellRing, BellOff } from 'lucide-react';
 
-/**
- * One card surface per state, so the day list can be read by colour before a
- * word of it is read.
- *
- * Only `open` keeps the white, lifted card: it is the one thing asking to be
- * acted on. Everything settled or blocked drops back to the page tone so it
- * stops competing, and `overdue` is the only state allowed to be loud.
- */
-const CARD_SURFACE: Record<CellState, string> = {
-  none: 'bg-white border-[#E6E0D4] shadow-sm',
-  open: 'bg-white border-[#E6E0D4] shadow-sm',
-  overdue: 'bg-[#B9553D]/[0.07] border-[#B9553D]/30',
-  done: 'bg-[#A1C181]/10 border-[#A1C181]/40',
-  cancelled: 'bg-[#F5F1EA] border-[#E6E0D4]',
-  unavailable: 'bg-[#F5F1EA] border-[#E6E0D4]'
-};
+// A card's surface, its badge and its words all come from `statePresentation`
+// in lib/schedule-view.ts, which the week grid and the grid's legend read too.
+// This used to be a local table that only the day list could see, which is how
+// the two views ended up with different names and different colours for the
+// same state.
 
 // --- Types ---
 type UserType = {
@@ -202,6 +197,107 @@ const MEMBER_SOFT_LIMIT = 20;
 const ADMIN_ONLY_HINT = 'רק מנהל הבית יכול לבצע פעולה זו';
 const noopSubscribe = () => () => {};
 
+/**
+ * What this day amounts to, and which day it is.
+ *
+ * Two problems in one bar. A resident opens the app to find out what they have
+ * to do, and that answer sat below four rows of filters. And every action here
+ * writes to the day being *viewed*, while the only thing naming that day was a
+ * strip of numbers that scrolled away with the list - so a full-width green
+ * "done" button could sit on screen with nothing saying which date it recorded.
+ *
+ * Sticky, therefore, and loud when the day is not today.
+ */
+function DayHeading({
+  summary,
+  onTrack,
+  isWeek,
+  dateLabel,
+  onBackToToday
+}: {
+  summary: {
+    owed: number;
+    settled: number;
+    /** The same two counts, narrowed to the acting resident. */
+    mine: { owed: number; settled: number };
+  };
+  /** The view is showing the present: today, or the week containing it. */
+  onTrack: boolean;
+  isWeek: boolean;
+  /** Already worded by the caller, because a day and a week read differently. */
+  dateLabel: string;
+  onBackToToday: () => void;
+}) {
+  const { owed, settled, mine } = summary;
+  const houseScope = isWeek ? 'בשבוע' : 'בבית';
+
+  // Hebrew counts one thing differently from many, and "יש לך 1 משימות" is the
+  // kind of wrong that makes an app feel machine-written.
+  const tasks = (n: number) => (n === 1 ? 'משימה אחת' : `${n} משימות`);
+
+  // The headline and the count have to describe the same set. "יש לך 1 משימות"
+  // beside a bare "0/4" invited reading the 4 as yours, when it was the whole
+  // household's. So when the headline is about you, the count is too.
+  const personal = mine.owed > 0;
+  const shown = personal
+    ? { settled: mine.settled, owed: mine.owed, scope: 'שלך' }
+    : { settled, owed, scope: houseScope };
+  const total = shown.settled + shown.owed;
+
+  // One fact, and it is whichever fact the reader most needs. What you owe
+  // beats what the house owes, and both beat a total.
+  const headline = personal
+    ? `יש לך ${tasks(mine.owed)}`
+    : owed > 0
+      ? `${tasks(owed)} ${houseScope}`
+      : settled > 0
+        ? 'הכל בוצע'
+        : 'אין משימות';
+
+  const progress = `בוצעו ${shown.settled} מתוך ${total} ${shown.scope}`;
+  const SettledIcon = STATE_ICONS[statePresentation('done').glyph];
+
+  return (
+    <div
+      // `top-14` is the app header's declared height: this sits directly under
+      // it rather than sliding beneath it. Full-bleed via `-mx-6`, so the tint
+      // that warns about the wrong day reaches both edges.
+      className={`sticky top-14 z-10 -mx-6 px-6 py-3 border-b backdrop-blur-xl ${
+        onTrack ? 'bg-page/95 border-line' : 'bg-warn/25 border-warn/50'
+      }`}
+    >
+      <div className="flex items-center justify-between gap-3">
+        <div className="min-w-0">
+          <p className="text-base font-extrabold text-ink truncate">{headline}</p>
+          {/* The date is the safety-critical half of this bar, so it is never
+              implied: "היום" appears only when it is true. */}
+          <p className="text-xs font-bold text-ink-muted truncate">{dateLabel}</p>
+        </div>
+        {total > 0 && (
+          <span
+            title={progress}
+            aria-label={progress}
+            className="flex-shrink-0 flex items-center gap-1 text-xs font-bold text-ink-mid tabular-nums"
+          >
+            <SettledIcon className="w-3.5 h-3.5 text-settled" strokeWidth={3} />
+            {shown.settled}/{total}
+          </span>
+        )}
+        {/* Only a way back, never a way to a day nobody asked for. */}
+        {!onTrack && (
+          <button
+            type="button"
+            onClick={onBackToToday}
+            className="flex-shrink-0 px-3 py-2 rounded-2xl bg-card border border-warn/50 text-xs font-bold text-warn-ink hover:bg-warn/10 transition-colors"
+          >
+            {isWeek ? 'חזרה לשבוע הזה' : 'חזרה להיום'}
+          </button>
+        )}
+      </div>
+    </div>
+  );
+}
+
 function AdminHint({
   allowed,
   hint = ADMIN_ONLY_HINT,
@@ -213,28 +309,66 @@ function AdminHint({
   className?: string;
   children: React.ReactNode;
 }) {
+  const { showToast } = useToast();
+  if (allowed) return <span className={className}>{children}</span>;
+
+  // A refusal that cannot be asked for a reason is just a broken button.
+  //
+  // The controls inside carry `disabled:pointer-events-none`, so a hover never
+  // reaches them and this `title` was the only explanation. On a phone there is
+  // no hover, which is where the app is actually used: a member saw a row of
+  // greyed-out controls and no way to find out why. Because the children pass
+  // pointer events through, the tap lands here, and here it can answer.
+  const reason = hint ?? ADMIN_ONLY_HINT;
+  const answer = () => showToast(reason, 'info');
   return (
-    <span title={allowed ? undefined : hint} className={className}>
+    <span
+      role="button"
+      tabIndex={0}
+      title={reason}
+      aria-label={reason}
+      onClick={answer}
+      onKeyDown={e => {
+        if (e.key === 'Enter' || e.key === ' ') {
+          e.preventDefault();
+          answer();
+        }
+      }}
+      className={`cursor-help ${className ?? ''}`}
+    >
       {children}
     </span>
   );
 }
 
+/**
+ * The activity log's action pills.
+ *
+ * The colours are taken from `statePresentation` rather than restated, because
+ * a log entry and the day it describes are the same fact: "דילוג משימה" in the
+ * feed should be the colour a handed-on day is in the grid.
+ *
+ * `העברת יום` and `החלפת ימים` were logged but missing here, so a rearranged
+ * day - the one action whose whole point is being able to see it happened -
+ * fell through to the generic fallback.
+ */
 const ACTION_STYLES: Record<string, { Icon: LucideIcon; className: string }> = {
-  'ביצוע משימה': { Icon: CheckCircle2, className: 'bg-[#A1C181]/20 text-[#5F7A45]' },
-  'ביטול משימה': { Icon: RotateCcw, className: 'bg-[#E9C46A]/25 text-[#8A6D1F]' },
-  'דילוג משימה': { Icon: FastForward, className: 'bg-[#3D5A80]/15 text-[#3D5A80]' },
-  'ביטול דילוג': { Icon: RotateCcw, className: 'bg-[#3D5A80]/15 text-[#3D5A80]' },
-  'החלפת תור': { Icon: Repeat, className: 'bg-[#7B6CA8]/20 text-[#5C4F86]' },
-  'סגירת יום ללא ביצוע': { Icon: X, className: 'bg-[#8C7E6A]/20 text-[#6B5E4C]' },
-  'ביטול סגירת יום': { Icon: RotateCcw, className: 'bg-[#8C7E6A]/20 text-[#6B5E4C]' },
-  'יצירת משימה': { Icon: Plus, className: 'bg-[#A1C181]/20 text-[#5F7A45]' },
-  'עריכת משימה': { Icon: Pencil, className: 'bg-[#8C7E6A]/20 text-[#6B5E4C]' },
-  'מחיקת משימה': { Icon: Trash2, className: 'bg-rose-100 text-rose-600' },
-  'ניתוק דייר': { Icon: UserMinus, className: 'bg-rose-100 text-rose-600' },
-  [MANUAL_LOG_ACTION]: { Icon: StickyNote, className: 'bg-[#E9C46A]/25 text-[#8A6D1F]' }
+  'ביצוע משימה': { Icon: CheckCircle2, className: statePresentation('done').badge },
+  'ביטול משימה': { Icon: RotateCcw, className: 'bg-warn/25 text-warn-ink' },
+  'דילוג משימה': { Icon: FastForward, className: HANDED_ON.badge },
+  'ביטול דילוג': { Icon: RotateCcw, className: HANDED_ON.badge },
+  'החלפת תור': { Icon: Repeat, className: 'bg-note/20 text-note-ink' },
+  'העברת יום': { Icon: MOVED_ICON, className: RELOCATED.badge },
+  'החלפת ימים': { Icon: TRADED_ICON, className: RELOCATED.badge },
+  'סגירת יום ללא ביצוע': { Icon: X, className: statePresentation('cancelled').badge },
+  'ביטול סגירת יום': { Icon: RotateCcw, className: statePresentation('cancelled').badge },
+  'יצירת משימה': { Icon: Plus, className: statePresentation('done').badge },
+  'עריכת משימה': { Icon: Pencil, className: 'bg-inset text-ink-mid' },
+  'מחיקת משימה': { Icon: Trash2, className: 'bg-danger/15 text-danger' },
+  'ניתוק דייר': { Icon: UserMinus, className: 'bg-danger/15 text-danger' },
+  [MANUAL_LOG_ACTION]: { Icon: StickyNote, className: 'bg-warn/25 text-warn-ink' }
 };
-const DEFAULT_ACTION_STYLE = { Icon: Activity, className: 'bg-[#F5F1EA] text-[#8C7E6A]' };
+const DEFAULT_ACTION_STYLE = { Icon: Activity, className: 'bg-sunken text-ink-muted' };
 
 // --- Main App Component ---
 export default function ChoresApp() {
@@ -257,6 +391,11 @@ export default function ChoresApp() {
   const users = usersSnap?.householdId === householdId ? usersSnap.users : [];
   const chores = choresSnap?.householdId === householdId ? choresSnap.chores : [];
   const logs = logsSnap?.householdId === householdId ? logsSnap.logs : [];
+  // An unanswered snapshot reads as a household with no chores, which is the
+  // same shape as a household that has none. The day list said "הכל נקי ומסודר"
+  // for the moment in between, so it congratulated everybody on a schedule it
+  // had not seen yet.
+  const choresLoading = !!householdId && choresSnap?.householdId !== householdId;
 
   const profileScope = user && householdId ? `${user.uid}:${householdId}` : '';
   const [pickedProfile, setPickedProfile] = useState<{ scope: string; id: string } | null>(null);
@@ -292,7 +431,18 @@ export default function ChoresApp() {
   // Re-derived on every clock tick, so anything keyed off it rolls over at
   // midnight without a reload.
   const todayStr = today.toDateString();
-  const [selectedDate, setSelectedDate] = useState<Date>(today);
+  // `null` means "follow today", and that is the fix for a real way to lose
+  // work. Every action writes to the day being viewed, not to today. Held as a
+  // date, a tab left open overnight kept the selection pinned to a yesterday
+  // that had quietly become overdue, while the day strip re-anchored around the
+  // new today - so the first tap next morning backdated a completion onto it.
+  // Following today by default means that cannot happen; a date the user
+  // actually picked is honoured, and the header says which one it is.
+  const [pinnedDate, setPinnedDate] = useState<Date | null>(null);
+  const selectedDate = pinnedDate ?? today;
+  // Choosing today is choosing to follow it.
+  const setSelectedDate = (date: Date) =>
+    setPinnedDate(dayKey(date) === dayKey(today) ? null : normalizeDay(date));
   const selectedDayIndex = selectedDate.getDay();
   const selectedDateStr = selectedDate.toDateString();
 
@@ -467,6 +617,134 @@ export default function ChoresApp() {
     }
   }, [avatarUploadRequestId]);
 
+  // --- The schedule, built once ---------------------------------------------
+  //
+  // Everything the tasks tab draws reads these rows, and nothing below calls
+  // `buildScheduleRows` again. Resolving one cell walks the calendar from today
+  // to the day in question and consults the rotation at every occurrence on the
+  // way, so a pass over a week is not cheap enough to do casually. Two things
+  // were doing it casually.
+  //
+  // The day list and the week grid were both built on every render whichever
+  // one was on screen, so each view paid for the other.
+  //
+  // And the dependencies below are keyed on `dayKey(today)`, not on `today`,
+  // which is a fresh Date on every render. Keyed on the object this memo could
+  // never hit: the minute tick that keeps absence windows current would rebuild
+  // the whole schedule sixty times an hour. Keyed on the day the tick is free,
+  // and the rebuild happens where it has to, when the date rolls over.
+  const todayKey = dayKey(today);
+  const selectedKey = dayKey(selectedDate);
+
+  // Both views read the same schedule through the same filters, so whatever the
+  // grid shows in a column is what the day list shows for that date.
+  const scheduleFilters: ScheduleFilters = useMemo(
+    () => ({
+      choreIds: choreFilterIds,
+      category: selectedCategoryFilter,
+      personId: selectedUserId === 'my_tasks' ? (currentUserId ?? 'all') : selectedUserId
+    }),
+    [choreFilterIds, selectedCategoryFilter, selectedUserId, currentUserId]
+  );
+
+  const schedule = useMemo(() => {
+    const showWeek = tasksView === 'week';
+    // The grid and its drop targets have to index into the same array, which is
+    // why this is built here and handed out rather than recomputed per reader.
+    const weekDays = weekAround(selectedDate);
+
+    const toWeekPerson = (u: UserType): WeekPerson => ({
+      id: u.id,
+      name: u.name,
+      color: u.color,
+      photoURL: resolvePhoto(u)
+    });
+
+    // A row survives only when at least one of its cells is scheduled, so with
+    // a single day the cell is always present.
+    const dayEntries = showWeek
+      ? []
+      : buildScheduleRows(chores, users, [selectedDate], scheduleFilters, today).flatMap(row => {
+          const cell = row.cells[0];
+          return cell.assignment ? [{ chore: row.chore, cell, assignment: cell.assignment }] : [];
+        });
+
+    const weekRows: WeekRow[] = !showWeek
+      ? []
+      : buildScheduleRows(chores, users, weekDays, scheduleFilters, today).map(row => ({
+          choreId: row.chore.id,
+          choreName: row.chore.name,
+          frequencyLabel: frequencyLabel(row.chore.frequency, row.chore.customDays),
+          cells: row.cells.map(cell => {
+            const u = users.find(x => x.id === cell.userId);
+            return {
+              state: cell.state,
+              person: u ? toWeekPerson(u) : null,
+              movedFrom: cell.movedFrom,
+              rearranged: cell.rearranged,
+              handedOn: isHandedOn(cell),
+              vacatedTo: cell.vacatedTo
+            };
+          })
+        }));
+
+    const weekLegendIds = new Set(
+      weekRows.flatMap(row => row.cells.flatMap(c => (c.person ? [c.person.id] : [])))
+    );
+
+    // What is on screen, in one line, counted from the rows that were actually
+    // built. Counting from `dayEntries` alone made the heading claim there was
+    // nothing to do whenever the week was showing, because the day rows are
+    // deliberately not built then.
+    //
+    // Read through `statePresentation` so "still owed" means here what it means
+    // on the cards: a skipped day counts, an unavailable one does not, because
+    // nobody owes it.
+    const summary = { owed: 0, settled: 0, mine: { owed: 0, settled: 0 } };
+    const tally = (state: CellState, userId: string | null) => {
+      const p = statePresentation(state);
+      const isMine = !!userId && userId === currentUserId;
+      if (p.owed) {
+        summary.owed += 1;
+        if (isMine) summary.mine.owed += 1;
+      }
+      if (p.settled) {
+        summary.settled += 1;
+        if (isMine) summary.mine.settled += 1;
+      }
+    };
+    if (showWeek) {
+      for (const row of weekRows) {
+        for (const cell of row.cells) tally(cell.state, cell.person?.id ?? null);
+      }
+    } else {
+      for (const { cell } of dayEntries) tally(cell.state, cell.userId);
+    }
+
+    // An empty view means one of two opposite things, and each view used to
+    // assume a different one: the day list called the house clean when the
+    // default "my tasks" filter was simply hiding everyone else's turn, and the
+    // week grid told a household with no chores to change a filter it had never
+    // set. Asking unfiltered says which it is. This used to ask by building a
+    // second set of rows, which resolved an assignee for every cell only to
+    // count the rows; whether anything is scheduled needs no assignee.
+    const anyScheduled = (days: Date[]) =>
+      chores.some(chore => days.some(day => choreOccursOnDate(chore, day, today)));
+
+    return {
+      weekDays,
+      dayEntries,
+      weekRows,
+      summary,
+      weekLegend: users.filter(u => weekLegendIds.has(u.id)).map(toWeekPerson),
+      dayHasAnySchedule: dayEntries.length > 0 || anyScheduled([selectedDate]),
+      weekHasAnySchedule: weekRows.length > 0 || anyScheduled(weekDays)
+    };
+    // `today` and `selectedDate` are read through their day keys above: a new
+    // Date for the same day must not invalidate a whole schedule.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [chores, users, scheduleFilters, tasksView, selectedKey, todayKey, user]);
+
   if (authLoading || houseLoading) {
     return (
       <div className="min-h-screen bg-[#FAF9F6] flex items-center justify-center">
@@ -561,11 +839,6 @@ export default function ChoresApp() {
   // selection out of that range rather than leaving the day view showing a date
   // no button matches.
   const daysArray = dayStripDays(today, selectedDate);
-
-  // The week containing the selected day, so the two views always describe the
-  // same stretch of time. Pinning this to `today` meant picking a date in the
-  // day view and switching to the week view showed a different week.
-  const weekDays = weekAround(selectedDate);
 
   const logAction = async (action: string, details: string, photoUrl?: string) => {
     if (!householdId || !currentUserId || !user) return;
@@ -1701,65 +1974,21 @@ export default function ChoresApp() {
   const renderTasks = () => {
     const isPastDay = normalizeDay(selectedDate).getTime() < normalizeDay(today).getTime();
     const isToday = normalizeDay(selectedDate).getTime() === normalizeDay(today).getTime();
-    const toWeekPerson = (u: UserType): WeekPerson => ({
-      id: u.id,
-      name: u.name,
-      color: u.color,
-      photoURL: resolvePhoto(u)
-    });
 
-    // Both views read the same schedule through the same filters, so whatever
-    // the grid shows in a column is what the day list shows for that date.
-    const filters: ScheduleFilters = {
-      choreIds: choreFilterIds,
-      category: selectedCategoryFilter,
-      personId: selectedUserId === 'my_tasks' ? (currentUserId ?? 'all') : selectedUserId
-    };
+    // Built once, above the early returns. Nothing here recomputes it.
+    const filters = scheduleFilters;
+    const {
+      weekDays,
+      dayEntries,
+      weekRows,
+      summary,
+      weekLegend,
+      dayHasAnySchedule,
+      weekHasAnySchedule
+    } = schedule;
 
-    // A row survives only when at least one of its cells is scheduled, so with a
-    // single day the cell is always present.
-    const dayEntries = buildScheduleRows(chores, users, [selectedDate], filters, today).flatMap(
-      row => {
-        const cell = row.cells[0];
-        return cell.assignment ? [{ chore: row.chore, cell, assignment: cell.assignment }] : [];
-      }
-    );
-
-    const weekRows: WeekRow[] = buildScheduleRows(chores, users, weekDays, filters, today).map(
-      row => ({
-        choreId: row.chore.id,
-        choreName: row.chore.name,
-        frequencyLabel: frequencyLabel(row.chore.frequency, row.chore.customDays),
-        cells: row.cells.map(cell => {
-          const u = users.find(x => x.id === cell.userId);
-          return {
-            state: cell.state,
-            person: u ? toWeekPerson(u) : null,
-            movedFrom: cell.movedFrom,
-            rearranged: cell.rearranged
-          };
-        })
-      })
-    );
-
-    const weekLegendIds = new Set(
-      weekRows.flatMap(row => row.cells.flatMap(c => (c.person ? [c.person.id] : [])))
-    );
-    const weekLegend = users.filter(u => weekLegendIds.has(u.id)).map(toWeekPerson);
-
-    // An empty view means one of two opposite things, and each view used to
-    // assume a different one: the day list called the house clean when the
-    // default "my tasks" filter was simply hiding everyone else's turn, and the
-    // week grid told a household with no chores to change a filter it had never
-    // set. Rebuilding unfiltered says which it is. `||` short-circuits, so the
-    // second pass only runs when there is nothing on screen to explain.
-    const dayHasAnySchedule =
-      dayEntries.length > 0 ||
-      buildScheduleRows(chores, users, [selectedDate], ALL_TASKS, today).length > 0;
-    const weekHasAnySchedule =
-      weekRows.length > 0 ||
-      buildScheduleRows(chores, users, weekDays, ALL_TASKS, today).length > 0;
-
+    const isWeekView = tasksView === 'week';
+    const weekHasToday = weekDays.some(d => dayKey(d) === todayKey);
     const weekRangeLabel = `${weekDays[0].toLocaleDateString('he-IL', { day: '2-digit', month: '2-digit' })} – ${weekDays[6].toLocaleDateString('he-IL', { day: '2-digit', month: '2-digit' })}`;
 
     // Rearranging is off while a person filter is on. The grid renders another
@@ -1774,6 +2003,31 @@ export default function ChoresApp() {
 
     return (
       <div className="flex flex-col gap-4 pb-24">
+        {/* The answer, before the controls that narrow it.
+            A resident opens this to find out what they have to do, and that
+            used to be below the fold behind four rows of filters. Derived from
+            the same rows the list renders, so it cannot contradict them. */}
+        <DayHeading
+          summary={summary}
+          isWeek={isWeekView}
+          // A week is on track when it contains today, a day when it is today.
+          // Paging to another week is the same mistake as paging to another
+          // day, and worth the same warning.
+          onTrack={isWeekView ? weekHasToday : isToday}
+          dateLabel={
+            isWeekView
+              ? weekHasToday
+                ? `השבוע · ${weekRangeLabel}`
+                : weekRangeLabel
+              : `${isToday ? 'היום · ' : ''}${selectedDate.toLocaleDateString('he-IL', {
+                  weekday: 'long',
+                  day: 'numeric',
+                  month: 'long'
+                })}`
+          }
+          onBackToToday={() => setSelectedDate(today)}
+        />
+
         {/* Choosing what to look at is one decision, so it reads as one block.
             Stacked at the section gap plus a margin each, these four bars cost
             most of a phone screen before the first task appeared. */}
@@ -1803,15 +2057,6 @@ export default function ChoresApp() {
             })}
           </div>
 
-          {/* Task filter, shared by both views */}
-          <MultiSelectFilter
-            options={taskFilterOptions}
-            selectedIds={choreFilterIds}
-            onChange={setChoreFilterIds}
-            allLabel="כל המשימות בבית"
-            countNoun="משימות"
-          />
-
           {/* Category Filter, shared by both views */}
           {chores.some(c => c.category) && (
             <div className="flex gap-2 overflow-x-auto pb-1 no-scrollbar">
@@ -1833,17 +2078,38 @@ export default function ChoresApp() {
             </div>
           )}
 
-          {/* Day / Week view toggle */}
-          <div className="flex bg-[#F1ECE3] border border-[#E6E0D4] rounded-2xl p-1">
-            {([['day', 'יום'], ['week', 'שבוע']] as const).map(([view, label]) => (
-              <button
-                key={view}
-                onClick={() => setTasksView(view)}
-                className={`flex-1 py-2 rounded-xl text-sm font-bold transition-all ${tasksView === view ? 'bg-white text-[#3D3732] shadow-sm' : 'text-[#8C7E6A] hover:text-[#4A443F]'}`}
-              >
-                {label}
-              </button>
-            ))}
+          {/* Which tasks, and over what span, on one row. The toggle spanned
+              the full width to no purpose - two words do not need 350px - and
+              the row it owned cost more screen than the control did. Both stay
+              fully visible at every width, which is the difference between
+              this and folding a filter into a neighbour's overflow.
+
+              The toggle stays last, next to the day list or grid it switches. */}
+          <div className="flex items-stretch gap-2">
+            <MultiSelectFilter
+              className="flex-1 min-w-0"
+              options={taskFilterOptions}
+              selectedIds={choreFilterIds}
+              onChange={setChoreFilterIds}
+              allLabel="כל המשימות בבית"
+              countNoun="משימות"
+            />
+            <div
+              role="group"
+              aria-label="טווח התצוגה"
+              className="flex flex-shrink-0 bg-[#F1ECE3] border border-[#E6E0D4] rounded-2xl p-1"
+            >
+              {([['day', 'יום'], ['week', 'שבוע']] as const).map(([view, label]) => (
+                <button
+                  key={view}
+                  onClick={() => setTasksView(view)}
+                  aria-pressed={tasksView === view}
+                  className={`px-4 rounded-xl text-sm font-bold transition-all ${tasksView === view ? 'bg-white text-[#3D3732] shadow-sm' : 'text-[#8C7E6A] hover:text-[#4A443F]'}`}
+                >
+                  {label}
+                </button>
+              ))}
+            </div>
           </div>
         </div>
 
@@ -1892,7 +2158,30 @@ export default function ChoresApp() {
         </div>
 
         <AnimatePresence mode="popLayout">
-          {dayEntries.length === 0 ? (
+          {choresLoading ? (
+            // Card-shaped, because the honest thing to show while the schedule
+            // is on its way is the shape of the schedule. A spinner says "wait"
+            // and an empty state says "there is nothing", and only one of those
+            // is true here.
+            <div aria-busy="true" aria-live="polite" className="flex flex-col gap-4">
+              <span className="sr-only">טוען משימות…</span>
+              {[0, 1, 2].map(i => (
+                <div
+                  key={i}
+                  className="p-5 rounded-3xl border bg-white border-[#E6E0D4] shadow-sm animate-pulse"
+                >
+                  <div className="flex justify-between items-start mb-4 gap-3">
+                    <div className="flex-1 min-w-0 flex flex-col gap-2">
+                      <div className="h-5 w-2/3 rounded-lg bg-[#F1ECE3]" />
+                      <div className="h-3 w-1/3 rounded-md bg-[#F5F1EA]" />
+                    </div>
+                    <div className="w-10 h-10 rounded-full bg-[#F1ECE3] flex-shrink-0" />
+                  </div>
+                  <div className="h-14 rounded-2xl bg-[#F1ECE3]" />
+                </div>
+              ))}
+            </div>
+          ) : dayEntries.length === 0 ? (
             <motion.div 
               initial={{ opacity: 0 }} animate={{ opacity: 1 }}
               className="flex flex-col items-center justify-center py-16 text-center"
@@ -1938,35 +2227,87 @@ export default function ChoresApp() {
                 ? logs.find(l => l.id === assignment.logId)
                 : undefined;
               const proofPhotos = completionLog ? logPhotos(completionLog) : [];
+
+              // Appearance and wording, from the one table every view reads.
+              const presentation = statePresentation(cell.state);
+              const StateIcon = STATE_ICONS[presentation.glyph];
+              const HandedOnIcon = STATE_ICONS[HANDED_ON.glyph];
+              const handedOn = isHandedOn(cell);
+              // `open` and `done` carry their state in the card itself - a
+              // lifted white card is a task to do, and the green bar below the
+              // title already says finished - so a pill on either is noise.
+              const stateBadge =
+                cell.state === 'open' || cell.state === 'done' ? null : presentation;
+              // A moved day and a traded day are told apart by whether the
+              // occurrence came from somewhere: `movedFrom` names the day it
+              // left, a trade only swaps who owes it.
+              const relocation = !cell.rearranged
+                ? null
+                : cell.movedFrom
+                  ? `${RELOCATED.moved} ${relativeDayLabel(dayKeyToDate(cell.movedFrom), today)}`
+                  : RELOCATED.traded;
+              const RelocationIcon = cell.movedFrom ? MOVED_ICON : TRADED_ICON;
+
               return (
                 <motion.div
                   layout
                   initial={{ opacity: 0, y: 10 }}
                   animate={{ opacity: 1, y: 0 }}
                   key={chore.id}
-                  className={`p-5 rounded-3xl border transition-all ${CARD_SURFACE[cell.state]}`}
+                  className={`p-4 rounded-3xl border transition-all ${presentation.surface}`}
                 >
-                  <div className="flex justify-between items-start mb-4">
-                    {/* Yields width to the assignee chip: the badges below are
-                        wide enough to starve it otherwise, and a wrapped task
-                        title beats a cropped face. */}
-                    <div className="min-w-0 flex-1">
+                  <div className="mb-3">
+                    {/* The task name is the header, so it gets its own line.
+                        Sharing one with the assignee chip meant competing with
+                        a "תור:" label, up to five avatars and an untruncated
+                        name, none of which shrink - so the title was the only
+                        thing that could give way, and a resident with a long
+                        name cropped it to a single letter. It wraps rather than
+                        truncates now: the one thing a card has to say is which
+                        chore it is. */}
+                    <div>
                       <div className="flex items-center gap-2 flex-wrap">
-                        <h3 className={`text-lg font-bold ${done ? 'text-[#6B5E4C]' : 'text-[#3D3732]'}`}>
+                        <h3
+                          className={`text-lg font-bold break-words ${done ? 'text-ink-mid' : 'text-ink'}`}
+                        >
                           {chore.name}
                         </h3>
-                        {/* At most one pill, and only where the card surface on
-                            its own could be misread. Done needs none: the green
-                            bar below the title already says it. */}
-                        {cell.state === 'overdue' ? (
-                          <span className="inline-flex items-center gap-1 text-[10px] font-bold text-[#B9553D] bg-[#B9553D]/10 px-2 py-0.5 rounded-full">
-                            <AlertTriangle className="w-3 h-3" /> באיחור
+                        {/* The state in one word, from the same table the week
+                            grid reads, so the two views cannot name a day
+                            differently. `done` needs no pill - the green bar
+                            below the title already says it - and `open` needs
+                            none either, because a plain lifted card is what a
+                            task still to do looks like. */}
+                        {stateBadge && (
+                          <span
+                            className={`inline-flex items-center gap-1 text-[11px] font-bold px-2 py-0.5 rounded-full ${stateBadge.badge}`}
+                          >
+                            <StateIcon className="w-3 h-3" /> {stateBadge.label}
                           </span>
-                        ) : cancelled ? (
-                          <span className="inline-flex items-center gap-1 text-[10px] font-bold text-[#8C7E6A] bg-[#F1ECE3] px-2 py-0.5 rounded-full">
-                            <X className="w-3 h-3" /> בוטל
+                        )}
+                        {/* A skip is not a state: it hands the turn on and
+                            leaves the day owed, so it rides alongside the state
+                            rather than replacing it. It used to be the faintest
+                            text on the card. */}
+                        {handedOn && (
+                          <span
+                            className={`inline-flex items-center gap-1 text-[11px] font-bold px-2 py-0.5 rounded-full ${HANDED_ON.badge}`}
+                            title={`${nameOf(assignment.skippedBy ?? undefined)} העביר/ה הלאה`}
+                          >
+                            <HandedOnIcon className="w-3 h-3" /> {HANDED_ON.label}
                           </span>
-                        ) : null}
+                        )}
+                        {/* Provenance, which the engine has always known and
+                            only the grid ever showed. If a day is not whose
+                            turn it looks like, the card has to be able to say
+                            why - that is the whole argument this app settles. */}
+                        {relocation && (
+                          <span
+                            className={`inline-flex items-center gap-1 text-[11px] font-bold px-2 py-0.5 rounded-full ${RELOCATED.badge}`}
+                          >
+                            <RelocationIcon className="w-3 h-3" /> {relocation}
+                          </span>
+                        )}
                       </div>
                       {/* Everything that describes the task rather than its
                           state reads as one quiet line. As pills they were six
@@ -2011,15 +2352,18 @@ export default function ChoresApp() {
                         )}
                       </p>
                     </div>
+                    {/* Whose turn it is, on the row below the name rather than
+                        beside it. Nothing here has to be truncated at this
+                        width, which is the point of moving it. */}
                     {unavailable ? (
-                      <div className="flex items-center gap-2 px-3 py-1.5 rounded-full bg-[#F1ECE3] text-[#8C7E6A]">
+                      <div className="mt-2 inline-flex items-center gap-2 px-3 py-1 rounded-full bg-inset text-ink-muted">
                         <UserX className="w-4 h-4 flex-shrink-0" />
                         <span className="text-sm font-bold">אף אחד לא פנוי</span>
                       </div>
                     ) : assignee && (
-                      <div className={`flex flex-col items-end gap-1`}>
+                      <div className={`mt-2 flex items-center`}>
                         {chore.rotation && chore.rotation.length > 1 ? (
-                          <div className={`flex items-center gap-1.5 px-3 py-1.5 rounded-3xl ${done ? '' : 'bg-[#F3EFE9]'}`}>
+                          <div className={`flex items-center gap-1.5 px-3 py-1 rounded-3xl min-w-0 ${done ? '' : 'bg-[#F3EFE9]'}`}>
                             <span className="text-[10px] font-bold text-[#8C7E6A] ml-1">תור:</span>
                             <div className="flex items-center" dir="ltr">
                               {(() => {
@@ -2050,12 +2394,12 @@ export default function ChoresApp() {
                                 });
                               })()}
                             </div>
-                            <span className="text-base font-extrabold text-[#3D3732] mr-2 border-r border-[#DED8CE] pr-2">
+                            <span className="text-sm font-extrabold text-ink mr-2 border-r border-line-strong pr-2 truncate">
                               {assignee.id === currentUserId ? 'התור שלך' : assignee.name}
                             </span>
                           </div>
                         ) : (
-                          <div className={`flex items-center gap-2 px-3 py-1.5 rounded-full ${done ? '' : 'bg-[#F3EFE9]'}`}>
+                          <div className={`flex items-center gap-2 px-3 py-1 rounded-full min-w-0 ${done ? '' : 'bg-[#F3EFE9]'}`}>
                             <Avatar
                               name={assignee.name}
                               color={assignee.color}
@@ -2063,7 +2407,7 @@ export default function ChoresApp() {
                               size="md"
                               title={assignee.name}
                             />
-                            <span className="text-base font-extrabold text-[#3D3732]">
+                            <span className="text-sm font-extrabold text-ink truncate">
                               {assignee.id === currentUserId ? 'התור שלך' : assignee.name}
                             </span>
                           </div>
@@ -3295,14 +3639,24 @@ export default function ChoresApp() {
         }}
       />
       {/* One line: the active home is the only thing here that changes, and
-          switching homes lives in settings rather than on every screen. */}
-      <header className="sticky top-0 z-10 bg-[#FAF9F6]/80 backdrop-blur-xl border-b border-[#E6E0D4] px-6 py-3 flex items-center justify-center">
-        <h1 className="text-lg font-extrabold text-[#3D3732] tracking-tight truncate max-w-full">
+          switching homes lives in settings rather than on every screen.
+
+          A declared height, because the day heading inside the tasks tab has
+          to stick directly beneath this one and needs to know how far down
+          that is. `z-30` keeps this above it when the two meet. */}
+      <header className="sticky top-0 z-30 h-14 bg-page/80 backdrop-blur-xl border-b border-line px-6 flex items-center justify-center">
+        <h1 className="text-lg font-extrabold text-ink tracking-tight truncate max-w-full">
           {household ? householdDisplayName(household) : 'תורנויות הבית'}
         </h1>
       </header>
 
-      <main className="flex-1 px-6 pt-6 overflow-y-auto">
+      {/* No `overflow-y-auto` here. This is inside a `min-h-screen` column, so
+          it is never height-bounded and never actually scrolled - the document
+          does the scrolling. All the overflow did was make this the containing
+          block for any `sticky` descendant, which silently broke the tasks
+          tab's sticky date heading: it had a scroll container that never
+          scrolled, so it scrolled away with the page. */}
+      <main className="flex-1 px-6 pt-6">
         {activeTab === 'tasks' && renderTasks()}
         {activeTab === 'history' && renderHistory()}
         {activeTab === 'settings' && renderSettings()}

@@ -35,7 +35,7 @@ export function Avatar({ name, color, photoURL, size = 'md', className = '', tit
         title={title}
         // Google avatar URLs reject requests that send a referrer.
         referrerPolicy="no-referrer"
-        className={`${base} object-cover bg-[#D4CBBF]`}
+        className={`${base} object-cover bg-avatar-empty`}
         onError={() => setFailedUrl(photoURL!)}
       />
     );

@@ -20,9 +20,9 @@ const ICONS: Record<ToastType, React.ReactNode> = {
 };
 
 const STYLES: Record<ToastType, string> = {
-  error: 'bg-rose-50 border-rose-200 text-rose-700',
-  success: 'bg-[#A1C181]/10 border-[#A1C181]/40 text-[#3D3732]',
-  info: 'bg-white border-[#E6E0D4] text-[#3D3732]'
+  error: 'bg-danger/10 border-danger/30 text-danger',
+  success: 'bg-settled/15 border-settled/40 text-ink',
+  info: 'bg-card border-line text-ink'
 };
 
 export function ToastProvider({ children }: { children: React.ReactNode }) {
@@ -40,11 +40,22 @@ export function ToastProvider({ children }: { children: React.ReactNode }) {
   return (
     <ToastContext.Provider value={{ showToast }}>
       {children}
-      <div className="fixed top-4 left-0 right-0 z-[100] flex flex-col items-center gap-2 px-4 pointer-events-none">
+      {/* A toast is the app answering, and an answer nobody is told about is
+          not an answer. The live region is on the container rather than on each
+          toast so it exists before the first one arrives; assistive technology
+          ignores a region that appears at the same moment as its content. */}
+      <div
+        role="status"
+        aria-live="polite"
+        aria-atomic="false"
+        className="fixed top-4 left-0 right-0 z-[100] flex flex-col items-center gap-2 px-4 pointer-events-none"
+      >
         <AnimatePresence>
           {toasts.map((t) => (
             <motion.div
               key={t.id}
+              // An error interrupts; a confirmation waits its turn.
+              role={t.type === 'error' ? 'alert' : undefined}
               initial={{ opacity: 0, y: -12 }}
               animate={{ opacity: 1, y: 0 }}
               exit={{ opacity: 0, y: -12 }}
