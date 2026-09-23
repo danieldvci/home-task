@@ -17,6 +17,8 @@ import {
   Copy,
   ChevronUp,
   ChevronDown,
+  ChevronLeft,
+  ChevronRight,
   X,
   History,
   Activity,
@@ -635,6 +637,18 @@ export default function ChoresApp() {
   // and the rebuild happens where it has to, when the date rolls over.
   const todayKey = dayKey(today);
   const selectedKey = dayKey(selectedDate);
+
+  // The day strip is wider than a phone, so the selected day can sit outside
+  // the part of it that is on screen. A week forward lands inside the window
+  // the strip is already showing, which moves the highlight without moving the
+  // strip, so the arrow would appear to do nothing. Kept in an effect so the
+  // ref is only ever read outside of render.
+  const dayStripRef = useRef<HTMLDivElement>(null);
+  useEffect(() => {
+    dayStripRef.current
+      ?.querySelector<HTMLElement>(`[data-day-key="${selectedKey}"]`)
+      ?.scrollIntoView({ inline: 'center', block: 'nearest', behavior: 'smooth' });
+  }, [selectedKey]);
 
   // Both views read the same schedule through the same filters, so whatever the
   // grid shows in a column is what the day list shows for that date.
@@ -2137,24 +2151,48 @@ export default function ChoresApp() {
           />
         ) : (
           <>
-        {/* Day Selector */}
-        <div className="flex justify-between items-center bg-white border border-[#E6E0D4] rounded-2xl p-2 mb-2 shadow-sm overflow-x-auto">
-          {daysArray.map((dateObj, idx) => {
-            const isSelected = dateObj.toDateString() === selectedDateStr;
-            const dayName = ['א׳', 'ב׳', 'ג׳', 'ד׳', 'ה׳', 'ו׳', 'ש׳'][dateObj.getDay()];
-            const isToday = dateObj.toDateString() === today.toDateString();
-            
-            return (
-              <button
-                key={idx}
-                onClick={() => setSelectedDate(dateObj)}
-                className={`flex flex-col items-center justify-center w-11 h-14 rounded-xl transition-all ${isSelected ? 'bg-[#A1C181] text-white shadow-sm' : 'text-[#8C7E6A] hover:bg-[#F5F1EA]'}`}
-              >
-                <span className={`text-[10px] font-bold mb-1 ${isSelected ? 'text-white/80' : ''}`}>{dayName}</span>
-                <span className={`text-sm font-extrabold ${isToday && !isSelected ? 'text-[#3D5A80]' : ''}`}>{dateObj.getDate()}</span>
-              </button>
-            )
-          })}
+        {/* Day Selector. The strip itself is anchored on today and follows the
+            selection, so the arrows only have to move the selection a week and
+            the days follow - the same shift the week view's arrows apply. They
+            sit outside the scrolling row so they cannot scroll away with it. */}
+        <div className="flex items-center bg-white border border-[#E6E0D4] rounded-2xl p-2 mb-2 shadow-sm">
+          <button
+            type="button"
+            onClick={() => setSelectedDate(shiftDays(selectedDate, -7))}
+            aria-label="שבוע קודם"
+            title="שבוע קודם"
+            className="flex-shrink-0 p-2 rounded-xl text-[#8C7E6A] hover:bg-[#F5F1EA] transition-colors"
+          >
+            <ChevronRight className="w-4 h-4" />
+          </button>
+          <div ref={dayStripRef} className="flex justify-between items-center flex-1 overflow-x-auto">
+            {daysArray.map((dateObj, idx) => {
+              const isSelected = dateObj.toDateString() === selectedDateStr;
+              const dayName = ['א׳', 'ב׳', 'ג׳', 'ד׳', 'ה׳', 'ו׳', 'ש׳'][dateObj.getDay()];
+              const isToday = dateObj.toDateString() === today.toDateString();
+
+              return (
+                <button
+                  key={idx}
+                  data-day-key={dayKey(dateObj)}
+                  onClick={() => setSelectedDate(dateObj)}
+                  className={`flex-shrink-0 flex flex-col items-center justify-center w-11 h-14 rounded-xl transition-all ${isSelected ? 'bg-[#A1C181] text-white shadow-sm' : 'text-[#8C7E6A] hover:bg-[#F5F1EA]'}`}
+                >
+                  <span className={`text-[10px] font-bold mb-1 ${isSelected ? 'text-white/80' : ''}`}>{dayName}</span>
+                  <span className={`text-sm font-extrabold ${isToday && !isSelected ? 'text-[#3D5A80]' : ''}`}>{dateObj.getDate()}</span>
+                </button>
+              )
+            })}
+          </div>
+          <button
+            type="button"
+            onClick={() => setSelectedDate(shiftDays(selectedDate, 7))}
+            aria-label="שבוע הבא"
+            title="שבוע הבא"
+            className="flex-shrink-0 p-2 rounded-xl text-[#8C7E6A] hover:bg-[#F5F1EA] transition-colors"
+          >
+            <ChevronLeft className="w-4 h-4" />
+          </button>
         </div>
 
         <AnimatePresence mode="popLayout">

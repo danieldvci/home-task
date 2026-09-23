@@ -428,7 +428,13 @@ const ALL: ScheduleFilters = { choreIds: [], category: 'all', personId: 'all' };
     ['the week arrows, one week back', TUE, shiftDays(TUE, -7)],
     ['the week arrows, several weeks on', TUE, shiftDays(TUE, 21)],
     ['the carry-over badge at its furthest reach', TUE, shiftDays(TUE, -MISSED_LOOKBACK_DAYS)],
-    ["this week's Sunday, tapped on a Saturday", SAT, shiftDays(SAT, -SAT.getDay())]
+    ["this week's Sunday, tapped on a Saturday", SAT, shiftDays(SAT, -SAT.getDay())],
+    // The strip's own arrows shift the selection a week, and reaching a distant
+    // date means pressing one of them several times. Each press re-anchors from
+    // where the last one left the selection, so a repeated press has to keep
+    // landing on the strip as much as the first one does.
+    ['the strip arrows, pressed back four times', TUE, shiftDays(TUE, -28)],
+    ['the strip arrows, pressed forward four times', TUE, shiftDays(TUE, 28)]
   ];
   for (const [via, today, selected] of jumps) {
     assert.ok(
