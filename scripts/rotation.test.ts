@@ -156,7 +156,11 @@ const trio = [present('u1'), present('u2'), present('u3')];
   assert.equal(isDoneOnDay(chore, WED), false);
 
   const monday = resolveDayAssignee(chore, trio, MON, TUE);
-  assert.equal(monday.userId, 'u3', 'past days step back from the completer, not the advanced pointer');
+  assert.equal(
+    monday.userId,
+    'u1',
+    'an unpaid Monday was still u1 carrying the turn, which is why they are the one who finally did it on Tuesday'
+  );
 
   // An occurrence completed ahead of time is frozen and takes no turn from the
   // days around it.
@@ -182,6 +186,121 @@ const trio = [present('u1'), present('u2'), present('u3')];
     resolveDayAssignee(chore, absentCompleter, THU, TUE).userId,
     'u3',
     'open days still skip the absent resident'
+  );
+}
+
+// --- A missed day stays with whoever owes it -------------------------------
+// The pointer moves only when somebody records something, so a day nobody
+// touched handed the turn to nobody. These used to be projected backwards from
+// `today`, which spent a turn per occurrence on the way: the distance grew
+// every night, so a missed day was shown against a different resident each
+// morning and the app answered "whose turn was it" differently on two
+// consecutive days.
+
+// Aug 16 2026 is the Sunday before MON, Aug 22 the Saturday after FRI.
+const SUN = new Date(2026, 7, 16, 12, 0, 0);
+const SAT = new Date(2026, 7, 22, 12, 0, 0);
+
+{
+  // Nothing has ever been recorded, so the pointer is where it started and
+  // every day this chore has missed is still the same resident's to do.
+  const untouched = makeChore({ currentIndex: 0 });
+  const missed = [SUN, MON, TUE, WED];
+
+  for (const day of missed) {
+    assert.equal(
+      resolveDayAssignee(untouched, trio, day, THU).userId,
+      'u1',
+      `${dayKey(day)} is still owed by the resident it came round to`
+    );
+  }
+  assert.equal(
+    resolveDayAssignee(untouched, trio, THU, THU).userId,
+    'u1',
+    "and today's card names that same resident, so the debt and the turn agree"
+  );
+
+  // The defect itself: the answer for a given day must not depend on when it is
+  // asked. A day is not renamed by the calendar rolling over.
+  for (const day of missed) {
+    assert.equal(
+      resolveDayAssignee(untouched, trio, day, FRI).userId,
+      resolveDayAssignee(untouched, trio, day, THU).userId,
+      `${dayKey(day)} is owed by the same resident whichever day it is asked on`
+    );
+  }
+}
+
+{
+  // u1 did Monday, handing the turn to u2. u2 let Tuesday and Wednesday go and
+  // finally did Thursday, so those two days were u2's all along - they are the
+  // proof of who was carrying the turn.
+  const completions = {
+    [dayKey(MON)]: { userId: 'u1', logId: 'l1', at: MON.toISOString() },
+    [dayKey(THU)]: { userId: 'u2', logId: 'l2', at: THU.toISOString() }
+  };
+  const chore = makeChore({ currentIndex: 2, completions });
+
+  assert.equal(resolveDayAssignee(chore, trio, TUE, FRI).userId, 'u2', 'the day u2 let slip is still owed by u2');
+  assert.equal(resolveDayAssignee(chore, trio, WED, FRI).userId, 'u2', 'and so is the next one');
+  assert.equal(resolveDayAssignee(chore, trio, FRI, FRI).userId, 'u3', 'but the turn has moved on since');
+}
+
+{
+  // A skip hands the turn on and leaves the day owed, so the days after it are
+  // owed by the resident it was handed to rather than by the one skipped.
+  const chore = makeChore({
+    currentIndex: 1,
+    completions: { [dayKey(MON)]: { userId: 'u1', at: MON.toISOString(), skipped: true } }
+  });
+  assert.equal(resolveDayAssignee(chore, trio, TUE, THU).userId, 'u2', 'the skip handed Tuesday to u2');
+  assert.equal(resolveDayAssignee(chore, trio, MON, THU).userId, 'u2', 'and left Monday itself owed by them too');
+}
+
+{
+  // Finishing a day ahead of time deliberately leaves the pointer alone, so it
+  // is no evidence at all about who was carrying the turn last Monday.
+  const early = makeChore({
+    currentIndex: 1,
+    completions: { [dayKey(SAT)]: { userId: 'u3', logId: 'l4', at: WED.toISOString() } }
+  });
+  assert.equal(
+    resolveDayAssignee(early, trio, MON, WED).userId,
+    'u2',
+    'a record dated after today cannot claim a day before it'
+  );
+}
+
+{
+  // Absence is read per day either way: somebody away when the day came round
+  // was stepped over then, and is stepped over now.
+  const awayMonday = [
+    {
+      id: 'u1',
+      isAbsent: false,
+      absentFrom: at(MON, 0).toISOString(),
+      absentUntil: at(MON, 23).toISOString()
+    },
+    present('u2'),
+    present('u3')
+  ];
+  const chore = makeChore({ currentIndex: 0 });
+  assert.equal(resolveDayAssignee(chore, awayMonday, MON, WED).userId, 'u2', 'u1 was away, so Monday was not theirs');
+  assert.equal(resolveDayAssignee(chore, awayMonday, TUE, WED).userId, 'u1', 'and Tuesday, when they were here, is');
+}
+
+{
+  // A trade hands one day over without touching the queue, and that holds for a
+  // day already gone as much as for one still to come.
+  const daily = makeChore({ currentIndex: 0 });
+  const traded = { ...daily, completions: withSwappedDays(daily, MON, 'u1', WED, 'u3', MON) };
+
+  assert.equal(resolveDayAssignee(traded, trio, MON, FRI).userId, 'u3', 'the day traded away shows who took it');
+  assert.equal(resolveDayAssignee(traded, trio, WED, FRI).userId, 'u1', 'and the day given back shows who owes it');
+  assert.equal(
+    resolveDayAssignee(traded, trio, TUE, FRI).userId,
+    'u1',
+    'a day somebody was handed says nothing about where the queue stands, so Tuesday is still the pointer'
   );
 }
 

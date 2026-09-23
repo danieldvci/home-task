@@ -588,16 +588,26 @@ ScheduleRow[]  ──┬─→ day list   (renderTasks, app/page.tsx)
 ```
 
 `resolveDayAssignee` is the single entry point for "who owns this chore on this
-day". Its two rules:
+day". Its three rules:
 
 1. A **completed** occurrence is frozen to the recorded person. It never follows
    the pointer and never reacts to a later absence.
-2. An **uncompleted** occurrence is projected forward from `currentIndex` by
-   `projectAssigneeIndex`, consuming one turn per open occurrence and skipping
-   residents whose absence window covers the day it lands on.
+2. An **uncompleted** occurrence still to come is projected forward from
+   `currentIndex` by `projectAssigneeIndex`, consuming one turn per open
+   occurrence and skipping residents whose absence window covers the day it
+   lands on.
+3. An **uncompleted** occurrence already in the past is not projected at all.
+   `owedSince` reads the resident still carrying it off the next record written
+   on or before today, falling back to `currentIndex` when there is none.
 
 So `currentIndex` means "who takes the next open occurrence", and recorded days
 are fixed points the projection re-anchors on as it walks past them.
+
+Rule 3 exists because the pointer moves only on a completion or a skip, so a
+day nobody touched handed the turn to nobody and the resident it came round to
+is still carrying it. Projecting it instead spent a turn per occurrence between
+the day and today, and that distance grows every night: a missed day slid one
+place along the rotation each time the date changed.
 
 The carry-over badge on today's card calls `missedOccurrences`, which repeats
 the same resolution for the previous 14 days and keeps the cells that came back

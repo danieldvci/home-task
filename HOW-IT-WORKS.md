@@ -59,17 +59,30 @@ day off, and editing chores or residents are the owner's.
 
 ## How a turn is decided
 
-Two rules drive the whole rotation engine, and they live in `lib/rotation.ts`:
+Three rules drive the whole rotation engine, and they live in `lib/rotation.ts`:
 
 1. **A completed occurrence is frozen** to the person recorded against that day.
    It never follows the rotation pointer and never reacts to a later absence. A
    trip booked next week cannot rewrite who did the dishes yesterday.
-2. **An uncompleted occurrence is projected** forward from `chore.currentIndex`,
-   consuming one turn per open occurrence and skipping residents whose absence
-   window covers the day that occurrence lands on.
+2. **An uncompleted occurrence still to come is projected** forward from
+   `chore.currentIndex`, consuming one turn per open occurrence and skipping
+   residents whose absence window covers the day that occurrence lands on.
+3. **An uncompleted occurrence already past stays with whoever owes it.** The
+   pointer moves only when somebody records something, so a day nobody touched
+   handed the turn to nobody: the resident it came round to is still carrying
+   it, and carries it until they do it or are skipped.
 
 So `currentIndex` means "who takes the next open occurrence", and the recorded
 days are fixed points the projection re-anchors on as it walks past them.
+
+The asymmetry in the middle is deliberate. A day still to come is a forecast and
+assumes the ones before it get done, so the queue spreads across it. A day
+already gone is not a forecast; it is a debt, and it belongs to one person. That
+person is read off the next record written on or before today — they were
+holding the turn right up to the moment it was written — or off `currentIndex`
+when nothing has been recorded since. Never from a walk backwards out of today:
+the number of occurrences between a past day and today grows every night, so a
+missed day used to be shown against a different resident each morning.
 
 Whether a chore occurs on a given day at all is decided by three fields:
 

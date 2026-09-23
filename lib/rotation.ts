@@ -688,6 +688,51 @@ export const projectAssigneeIndex = (
 };
 
 /**
+ * Who still owes a day in the past that was never resolved.
+ *
+ * The pointer moves only when somebody records something, so a day nobody
+ * touched handed the turn to nobody: whoever it came round to is still carrying
+ * it. That resident is the one named on the next record written on or before
+ * today, because they held the turn right up to the moment it was written, and
+ * `currentIndex` when nothing has been recorded since.
+ *
+ * Reading it off a record instead of walking back from `today` is what keeps
+ * the answer still. The walk spent a turn per occurrence between the day and
+ * today, and that distance grows every night, so an unpaid day slid one place
+ * along the rotation each time the date changed - a Tuesday shown against one
+ * resident was shown against their neighbour on Wednesday morning.
+ */
+const owedSince = (chore: Chore, residents: Residents, day: Date, today: Date) => {
+  const rotation = chore.rotation ?? [];
+  if (rotation.length === 0) return -1;
+
+  const from = dayKey(day);
+  // Completing or skipping a day ahead of today deliberately leaves the pointer
+  // alone, so a record dated later says nothing about who was carrying the turn.
+  const until = dayKey(today);
+  const completions = chore.completions ?? {};
+  let nextKey: string | null = null;
+  let carried = chore.currentIndex;
+
+  for (const key of Object.keys(completions)) {
+    if (key <= from || key > until) continue;
+    if (nextKey !== null && key >= nextKey) continue;
+    // Only a record the queue itself passed through. A day handed over by a
+    // move or a trade names whoever took that one day, not whoever holds the
+    // turn, and a resident since dropped from the rotation places nobody.
+    const record = completions[key];
+    if (record.assignedTo) continue;
+    const recorded = rotation.indexOf(record.userId);
+    if (recorded < 0) continue;
+    nextKey = key;
+    carried = recorded;
+  }
+
+  // Somebody away that day was stepped over then and is stepped over now.
+  return getActiveAssigneeIndex(chore, indexUsers(residents), carried, day);
+};
+
+/**
  * True when nobody in the rotation can take the chore on that day, either
  * because they are away or because they no longer have a profile. The pointer
  * still lands on someone, so callers have to check this to avoid presenting an
@@ -801,10 +846,18 @@ export const resolveDayAssignee = (
     };
   }
 
-  // The projection runs either way, so the turn this day consumes is the same
-  // whether or not somebody was handed it: an override changes who does this
-  // one day, never what the queue does afterwards.
-  const projected = projectAssigneeIndex(chore, users, chore.currentIndex, today, day);
+  // A day still to come is a forecast and assumes the ones before it get done,
+  // so it is projected a turn at a time. A day already gone is not: nothing was
+  // recorded on it, so it handed the turn to nobody and whoever it came round
+  // to still owes it.
+  //
+  // Either way it is resolved before the override below, so the turn this day
+  // consumes is the same whether or not somebody was handed it: an override
+  // changes who does this one day, never what the queue does afterwards.
+  const projected =
+    normalizeDay(day).getTime() < normalizeDay(today).getTime()
+      ? owedSince(chore, users, day, today)
+      : projectAssigneeIndex(chore, users, chore.currentIndex, today, day);
   const handedTo = record?.assignedTo ? (chore.rotation?.indexOf(record.assignedTo) ?? -1) : -1;
   const index = handedTo >= 0 ? handedTo : projected;
   return {

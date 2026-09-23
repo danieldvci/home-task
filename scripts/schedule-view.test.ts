@@ -292,6 +292,30 @@ const ALL: ScheduleFilters = { choreIds: [], category: 'all', personId: 'all' };
 }
 
 {
+  // What the grid draws across a run of missed days. The pointer moves only
+  // when somebody records something, so one resident holds the whole run and
+  // today's column names them too. Projected backwards from today these landed
+  // on a different resident every column, and on different ones again the next
+  // morning, so the week read as a rota nobody recognised instead of as a debt.
+  const chore = makeChore({ currentIndex: 1 });
+  const FRI = shiftDays(TUE, 3);
+  const [row] = buildScheduleRows([chore], trio, weekAround(FRI), ALL, FRI);
+
+  const late = row.cells.filter(c => c.state === 'overdue');
+  assert.ok(late.length >= 3, 'the week holds a run of missed days worth comparing');
+  assert.deepEqual(
+    [...new Set(late.map(c => c.userId))],
+    ['u2'],
+    'the whole run is owed by the one resident who never passed the turn on'
+  );
+  assert.equal(
+    row.cells.find(c => c.key === dayKey(FRI))?.userId,
+    'u2',
+    "and today's column names them as well, so the debt and the turn agree"
+  );
+}
+
+{
   // Which days are outstanding depends only on the schedule and what was
   // recorded, never on who the pointer happens to name, so the badge counts the
   // same days no matter when it is rendered.

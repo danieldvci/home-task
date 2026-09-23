@@ -34,6 +34,38 @@ The toast helper already exists as `showToast` in `components/Toast.tsx`.
 
 ## Fixed
 
+### A missed day was shown against a different resident every morning — fixed 2026-09-17
+
+Nothing is stored for a day nobody touched, so `resolveDayAssignee` worked out
+who owed it by walking the rotation back from `today`, spending a turn per
+occurrence on the way. `today` advances every night while `currentIndex` does
+not, so the distance grew by one each morning and every unpaid day in a gap slid
+one place along the rotation. A household saw Tuesday against Alice on Tuesday
+and against Charlie on Wednesday, now badged late. For an app whose whole pitch
+is ending the argument about whose turn it was, answering differently on two
+consecutive days is the worst thing it can do.
+
+It was also wrong on its own terms. The pointer moves only on a completion or a
+skip, so a missed day hands the turn to nobody — yet the backward walk spread a
+run of missed days across the whole household, and could put a resident on the
+day right after the one they had just completed.
+
+An unpaid day in the past is now read rather than projected: `owedSince` in
+`lib/rotation.ts` takes the resident named on the next record written on or
+before today, who was carrying the turn right up to the moment it was written,
+and falls back to `currentIndex` when nothing has been recorded since. Records
+carrying `assignedTo` are ignored, because a move or a trade names whoever took
+that one day and not whoever holds the queue, and records dated after today are
+ignored too, since finishing a day early deliberately leaves the pointer alone.
+The answer no longer mentions `today` at all, so asking about a given day
+tomorrow returns what it returned this morning.
+
+Days still to come are unchanged. A forecast assumes the days before it get
+done, so the queue still spreads across them a turn at a time — which means
+tomorrow names the next resident, and names today's resident once it becomes
+today and today went unmarked. That is a forecast being revised rather than
+history being rewritten.
+
 ### A long resident name cropped the task name off the card — fixed 2026-09-14
 
 The day-list card header was one flex row holding the task name and the assignee
