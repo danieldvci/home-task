@@ -96,14 +96,15 @@ const dayIndexUnder = (x: number, y: number, dragged: HTMLElement | null) => {
 
 type WeekOverviewProps = {
   days: Date[];
-  todayStr: string;
   /**
-   * The day both views are pointing at. The grid drives `selectedDate` through
-   * `onSelectDay` and `onShiftWeek`, so marking today instead left the two
-   * views disagreeing about which day was current - and once the week had been
-   * paged, today was not on screen at all and nothing was marked.
+   * The only column the grid marks, and only while it is on screen. Paging is
+   * `selectedDate` shifted by seven, so marking the selection instead lit up a
+   * column in every week the user stepped through - a day they had not chosen,
+   * looking exactly like the one they had. A week with nothing marked is the
+   * honest answer, and the same one the range heading already gives by
+   * dropping its `השבוע` prefix.
    */
-  selectedStr: string;
+  todayStr: string;
   rows: WeekRow[];
   legend: WeekPerson[];
   onSelectDay?: (date: Date) => void;
@@ -228,8 +229,8 @@ type DayCellProps = {
   day: Date;
   dayIndex: number;
   title: string;
-  /** Tints the column the day view is showing, so the two views agree. */
-  isSelected: boolean;
+  /** Tints today's column, on the one week that has it. */
+  isToday: boolean;
   /** This cell is the one being held. */
   picked: boolean;
   /** What dropping here would do, or null when it is not a legal target. */
@@ -252,7 +253,7 @@ function DayCell({
   day,
   dayIndex,
   title,
-  isSelected,
+  isToday,
   picked,
   dropKind,
   rearranging,
@@ -402,7 +403,7 @@ function DayCell({
   return (
     <td
       data-day-index={dayIndex}
-      className={`px-0.5 py-1 align-middle ${isSelected ? 'bg-settled/10' : ''}`}
+      className={`px-0.5 py-1 align-middle ${isToday ? 'bg-settled/10' : ''}`}
     >
       {!interactive ? (
         <div className="mx-auto flex items-center justify-center tap-target" title={title}>
@@ -456,7 +457,6 @@ function DayCell({
 export function WeekOverview({
   days,
   todayStr,
-  selectedStr,
   rows,
   legend,
   onSelectDay,
@@ -696,20 +696,13 @@ export function WeekOverview({
               </th>
               {days.map(day => {
                 const isToday = day.toDateString() === todayStr;
-                const isSelected = day.toDateString() === selectedStr;
                 return (
                   <th key={day.toDateString()} className="px-0.5 py-2 min-w-[44px]">
                     <div
-                      className={`flex flex-col items-center justify-center rounded-xl py-1 ${isSelected ? 'bg-[#A1C181] text-white shadow-sm' : 'text-[#8C7E6A]'}`}
+                      className={`flex flex-col items-center justify-center rounded-xl py-1 ${isToday ? 'bg-[#A1C181] text-white shadow-sm' : 'text-[#8C7E6A]'}`}
                     >
                       <span className="text-[10px] font-bold">{DAY_LETTERS[day.getDay()]}</span>
-                      {/* Same pairing as the day strip: the selection is the
-                          filled pill, today is only tinted when it is not it. */}
-                      <span
-                        className={`text-[11px] font-extrabold ${isToday && !isSelected ? 'text-[#3D5A80]' : ''}`}
-                      >
-                        {day.getDate()}
-                      </span>
+                      <span className="text-[11px] font-extrabold">{day.getDate()}</span>
                     </div>
                   </th>
                 );
@@ -741,7 +734,7 @@ export function WeekOverview({
                   </th>
                   {row.cells.map((cell, i) => {
                     const day = days[i];
-                    const isSelected = day.toDateString() === selectedStr;
+                    const isToday = day.toDateString() === todayStr;
                     const dayLabel = `${DAY_LETTERS[day.getDay()]} ${day.getDate()}`;
                     const title = [
                       cell.person?.name,
@@ -762,7 +755,7 @@ export function WeekOverview({
                         day={day}
                         dayIndex={i}
                         title={title}
-                        isSelected={isSelected}
+                        isToday={isToday}
                         picked={isPickedRow && held?.index === i}
                         dropKind={dropKind}
                         rearranging={!!held}

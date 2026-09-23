@@ -34,6 +34,24 @@ The toast helper already exists as `showToast` in `components/Toast.tsx`.
 
 ## Fixed
 
+### Paging the week grid marked a day nobody had chosen — fixed 2026-09-23
+
+The displayed week is `weekAround(selectedDate)`, so the arrows page by shifting
+`selectedDate` seven days. The grid marked that selection, which meant every
+week the user stepped through arrived with a column already filled green and
+its cells tinted — the same weekday as today, a week or more away, drawn exactly
+like a day they had picked. In a week of 13.09–19.09 viewed on the 23rd, the
+16th was marked.
+
+The grid now marks today and nothing else, so paging away from this week leaves
+no column marked. That is the answer the range heading was already giving by
+showing `השבוע ·` only on the week that holds today.
+
+Marking the selection was itself the fix in `8bc86ac`, on the grounds that the
+grid decides which date the day view opens on. That reasoning does not survive
+contact with `onSelectDay`, which switches to the day view on the same tap — a
+selection made in the grid is never visible in it.
+
 ### A missed day was shown against a different resident every morning — fixed 2026-09-17
 
 Nothing is stored for a day nobody touched, so `resolveDayAssignee` worked out
