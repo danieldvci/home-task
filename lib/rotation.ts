@@ -64,6 +64,10 @@ export type Chore = {
   // First day the chore exists. Documents written before this field means the
   // schedule has no lower bound, which is the pre-startDate behaviour.
   startDate?: string | null;
+  // Name of the icon the chore is drawn with. Nothing here reads it - see
+  // `choreIconId` in lib/default-icons, which derives one from the name when
+  // the field is missing.
+  icon?: string | null;
 };
 
 // Structural subset of the app's UserType, so any richer profile works here.

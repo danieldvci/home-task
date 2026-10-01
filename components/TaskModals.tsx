@@ -279,7 +279,13 @@ export function DoneConfirmModal({ choreName, busy, onConfirm, onCancel }: Props
   );
 }
 
-type QuickTaskCandidate = { id: string; name: string; color: string; photoURL?: string | null };
+type QuickTaskCandidate = {
+  id: string;
+  name: string;
+  color: string;
+  photoURL?: string | null;
+  icon?: string | null;
+};
 
 type QuickTaskProps = {
   /** Prefilled name, usually the chore this extra round comes from. */
@@ -355,7 +361,7 @@ export function QuickTaskModal({
                     : 'bg-white border-[#E6E0D4] opacity-70 hover:opacity-100'
                 }`}
               >
-                <Avatar name={c.name} color={c.color} photoURL={c.photoURL} size="sm" />
+                <Avatar name={c.name} color={c.color} photoURL={c.photoURL} icon={c.icon} iconSeed={c.id} size="sm" />
                 <span className="text-sm font-medium text-[#3D3732]">{c.name}</span>
               </button>
             ))}
@@ -517,7 +523,13 @@ export function SkipConfirmModal({ choreName, busy, onConfirm, onCancel }: SkipP
   );
 }
 
-type SwapCandidate = { id: string; name: string; color: string; photoURL?: string | null };
+type SwapCandidate = {
+  id: string;
+  name: string;
+  color: string;
+  photoURL?: string | null;
+  icon?: string | null;
+};
 
 type SwapProps = {
   choreName: string;
@@ -569,7 +581,7 @@ export function SwapTurnModal({ choreName, candidates, busy, onConfirm, onCancel
                     : 'bg-[#FAF9F6] border-[#E6E0D4] hover:bg-[#F3EFE9]'
                 }`}
               >
-                <Avatar name={c.name} color={c.color} photoURL={c.photoURL} size="sm" />
+                <Avatar name={c.name} color={c.color} photoURL={c.photoURL} icon={c.icon} iconSeed={c.id} size="sm" />
                 <span className="font-medium text-[#3D3732]">{c.name}</span>
               </button>
             ))}

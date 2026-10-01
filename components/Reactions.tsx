@@ -17,6 +17,7 @@ type ReactionUser = {
   name: string;
   color: string;
   photoURL?: string;
+  icon?: string | null;
 };
 
 type Props = {
@@ -149,6 +150,8 @@ export function ReactionBar({
                     name={author?.name || '?'}
                     color={author?.color || 'bg-[#D4CBBF]'}
                     photoURL={photoOf?.(comment.userId)}
+                    icon={author?.icon}
+                    iconSeed={author?.id}
                     size="sm"
                   />
                   <div className="flex-1 min-w-0">

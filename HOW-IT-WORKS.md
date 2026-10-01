@@ -39,8 +39,8 @@ One Firestore document tree per household, at `households/{id}`:
 
 | Collection | Holds |
 |---|---|
-| the household document | name, `ownerId`, `members` |
-| `users` | resident profiles: name, colour, photo, absence window |
+| the household document | name, `ownerId`, `members`, `managerIds`, `setupComplete` |
+| `users` | resident profiles: name, colour, photo or icon, absence window |
 | `chores` | the schedule, the rotation, and every recorded day |
 | `logs` | the activity feed, with photos, reactions and comments |
 
@@ -53,9 +53,62 @@ in the kitchen can act as any of them. Every log record therefore carries both
 that actually wrote it. The security rules verify `actorUid`, so nobody can
 write a record as someone else even though anyone can act as any profile.
 
-**The owner is the admin.** `household.ownerId` is the only elevated role. Any
-member may mark a chore done on their own turn; skipping, swapping, writing a
-day off, and editing chores or residents are the owner's.
+**There are two elevated roles, not one.** Any member may mark a chore done.
+Everything past that splits in two:
+
+| Role | Who | May |
+|---|---|---|
+| Manager | the owner, plus any account in `household.managerIds` | Skip, swap, write a day off, move and trade days, edit chores and residents, prune history, upload a resident's photo |
+| Owner | `household.ownerId` | All of the above, plus renaming the home, disconnecting a member, and handing out the manager role |
+
+A co-manager exists because one person doing all the marking is the failure the
+app was built to end. Handing out the role stays the owner's alone, or a
+co-manager could promote themselves past every limit the role still has.
+
+Only an account can hold the role. A local profile is a face on a shared phone,
+not something the security rules can check, so `managerIds` is validated as a
+subset of `members`. `isManager` in `firestore.rules` also re-checks membership
+rather than trusting the list, because disconnecting somebody and pruning
+`managerIds` are two separate writes and the role must count for nothing in
+between.
+
+Both fields are read with a default, so a household written before co-managers
+existed — which has neither key — still answers for its owner.
+
+## The first run
+
+A household that has just been created has one resident and no chores, and
+finding where to add either meant going three taps into a collapsed settings
+section. A new home now opens `components/HouseholdSetup.tsx` instead: name the
+home, list who lives there, tick the chores you actually do.
+
+`setupComplete` decides whether that happens, and the polarity matters. Only
+`false` means "has not been through the wizard"; a **missing** field means an
+existing household, which already has chores and must never be sent back to the
+start. `createHousehold` is the only thing that writes `false`.
+
+The wizard writes nothing itself. `buildSetupPlan` in `lib/household-setup.ts`
+turns the draft into documents, the page commits residents, chores and the flag
+in one `writeBatch`, and a failure leaves the draft on screen to retry — so a
+household is never left with residents but no chores.
+
+## Faces
+
+A resident is drawn, in this order, as their photo, then their icon, then the
+first letter of their name; `components/Avatar.tsx` is the only thing that
+decides. A chore is drawn with its icon.
+
+What a document stores is a short name like `dishes` or `rocket`, never a
+component and never an image — the value round-trips through Firestore and the
+rules can only check a string. `lib/default-icons.ts` owns the names and
+`components/default-icons.tsx` turns them into Lucide components, the same
+split as `statePresentation` and `components/state-icons.ts`, for the same
+reason: `lib/` has to keep running under `tsx` in the test suite.
+
+Nothing is migrated. A chore with no stored icon is drawn from its name, and a
+resident with none from a hash of their id — which is why renaming somebody
+does not hand them a different face. That also covers a name written by a later
+build that this one does not know.
 
 ## How a turn is decided
 
@@ -140,17 +193,28 @@ and each is also appended to the activity log.
 
 | Action | Who | Effect |
 |---|---|---|
-| Mark done | the assignee, or the owner | Records the day against the person, moves the pointer on. Optional proof photos. |
-| Undo done | whoever completed it, or the owner | Removes the record and returns the pointer to them. |
-| Skip | owner | Records the day as skipped and moves the pointer on. The day stays owed. |
-| Undo skip | owner | Removes the record and returns the turn. |
-| Write off | owner | Records the day as cancelled against whoever owed it. Takes no turn, so the pointer is untouched. |
-| Undo write-off | owner | Removes the record; the day is owed again. |
-| Move a day | owner | Drag a day in the week grid onto an empty one. The occurrence stops falling on the first and starts falling on the second, keeping the resident who owed it. |
-| Trade two days | owner | Drag a day onto another resident's day in the same row. Both keep their occurrence and the two residents exchange them. |
-| Swap | owner | Exchanges two residents' positions in the rotation. Note this is permanent, not a one-day trade. |
-| One-off task | owner | Creates a `once` chore on the day being viewed, for an extra round of something. |
+| Mark done | the assignee, or a manager | Records the day against the person, moves the pointer on. Optional proof photos. |
+| Undo done | whoever completed it, or a manager | Removes the record and returns the pointer to them. |
+| Skip | manager | Records the day as skipped and moves the pointer on. The day stays owed. |
+| Undo skip | manager | Removes the record and returns the turn. |
+| Write off | manager | Records the day as cancelled against whoever owed it. Takes no turn, so the pointer is untouched. |
+| Undo write-off | manager | Removes the record; the day is owed again. |
+| Move a day | manager | Drag a day in the week grid onto an empty one. The occurrence stops falling on the first and starts falling on the second, keeping the resident who owed it. |
+| Trade two days | manager | Drag a day onto another resident's day in the same row. Both keep their occurrence and the two residents exchange them. |
+| Swap | manager | Exchanges two residents' positions in the rotation. Note this is permanent, not a one-day trade. |
+| One-off task | manager | Creates a `once` chore on the day being viewed, for an extra round of something. |
 | Manual entry | any member | Writes a log record with no chore behind it. |
+
+Marking done is one tap: the button records the day for whoever is named on the
+card. The camera beside it is the longer route, for a photo or for crediting
+somebody else. Undo is on the card afterwards, which is what lets the quick
+path be quick — nothing it does is hard to take back. Writing a day off asks
+first, because that one is not a completion and quietly ends the day.
+
+Whoever is holding the phone acts for whoever is selected, which is the point:
+a resident with no phone of their own gets marked off from the kitchen tablet.
+The profile switcher sits above the task list so it takes one tap to change who
+the next completion is credited to, and the tasks are filtered to them.
 
 Completing or skipping a future day deliberately does not move the pointer, so
 finishing Saturday's turn early cannot steal the turn from the days in between.
@@ -184,8 +248,10 @@ is append-only, so undoing a completion writes a second record rather than
 removing the first. Anything that answers "who did what" reads the completions
 map.
 
-**Settings** covers residents, chores, absence windows, household membership and
-reminders.
+**Settings** covers residents, chores, absence windows, household membership,
+manager roles and reminders. Controls a member may not use are hidden rather
+than greyed out: a phone has no hover, so a disabled control there has no way
+at all to say why it is disabled.
 
 ## Limits worth knowing
 

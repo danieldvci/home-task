@@ -16,10 +16,16 @@ service firebase.storage {
         && request.auth.uid in firestore.get(/databases/(default)/documents/households/$(householdId)).data.members;
     }
 
-    function isOwnerOfHousehold(householdId) {
+    // The owner, or an account the owner promoted. `get` with a default,
+    // because a household written before co-managers existed has no such
+    // field and reading a missing key would fail the whole rule.
+    function isManagerOfHousehold(householdId) {
       return isSignedIn()
         && firestore.exists(/databases/(default)/documents/households/$(householdId))
-        && request.auth.uid == firestore.get(/databases/(default)/documents/households/$(householdId)).data.ownerId;
+        && (
+          request.auth.uid == firestore.get(/databases/(default)/documents/households/$(householdId)).data.ownerId
+          || request.auth.uid in firestore.get(/databases/(default)/documents/households/$(householdId)).data.get('managerIds', [])
+        );
     }
 
     // Proof photos are evidence, so a name may be claimed once and never
@@ -33,8 +39,8 @@ service firebase.storage {
         && request.resource.contentType.matches('image/jpeg');
     }
 
-    // Custom profile-photo uploads. A member may set their own avatar; the
-    // household owner may set an avatar for local (non-Google) residents too.
+    // Custom profile-photo uploads. A member may set their own avatar; a
+    // manager may set an avatar for local (non-Google) residents too.
     // The client stores an avatar as <userId>.jpg, and the wildcard binds the
     // whole file name, extension included, so the comparison has to spell it
     // out. Matching on the bare uid silently locked every non-owner member out
@@ -42,7 +48,7 @@ service firebase.storage {
     match /households/{householdId}/avatars/{fileName} {
       allow read: if isMember(householdId);
       allow write: if isMember(householdId)
-        && (fileName == request.auth.uid + '.jpg' || isOwnerOfHousehold(householdId))
+        && (fileName == request.auth.uid + '.jpg' || isManagerOfHousehold(householdId))
         && request.resource.size < 2 * 1024 * 1024
         && request.resource.contentType.matches('image/jpeg');
     }

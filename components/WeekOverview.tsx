@@ -14,6 +14,7 @@ export type WeekPerson = {
   name: string;
   color: string;
   photoURL?: string;
+  icon?: string | null;
 };
 
 export type WeekCell = {
@@ -182,6 +183,8 @@ function CellContent({ cell }: { cell: WeekCell }) {
         name={cell.person.name}
         color={cell.person.color}
         photoURL={cell.person.photoURL}
+        icon={cell.person.icon}
+        iconSeed={cell.person.id}
         size="sm"
         className={
           // A done day is marked by its badge alone. Dimming it was tuned for
@@ -788,7 +791,7 @@ export function WeekOverview({
       <div className="flex flex-wrap items-center gap-x-4 gap-y-2 px-1">
         {legend.map(p => (
           <div key={p.id} className="flex items-center gap-1.5">
-            <Avatar name={p.name} color={p.color} photoURL={p.photoURL} size="sm" />
+            <Avatar name={p.name} color={p.color} photoURL={p.photoURL} icon={p.icon} iconSeed={p.id} size="sm" />
             <span className="text-xs font-medium text-ink-muted">{p.name}</span>
           </div>
         ))}

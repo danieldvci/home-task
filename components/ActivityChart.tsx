@@ -5,7 +5,13 @@ import { X } from 'lucide-react';
 import { Avatar } from './Avatar';
 import type { DayTally, UserTotal } from '../lib/activity-stats';
 
-export type ChartPerson = { id: string; name: string; color: string; photoURL?: string | null };
+export type ChartPerson = {
+  id: string;
+  name: string;
+  color: string;
+  photoURL?: string | null;
+  icon?: string | null;
+};
 
 type ActivityChartProps = {
   days: DayTally[];
@@ -128,6 +134,8 @@ export function ActivityChart({ days, totals, people, max, todayKey }: ActivityC
                 name={person.name}
                 color={person.color}
                 photoURL={person.photoURL}
+                icon={person.icon}
+                iconSeed={person.id}
                 size="sm"
                 className={total.count === 0 ? 'opacity-40' : ''}
               />
@@ -169,6 +177,8 @@ export function ActivityChart({ days, totals, people, max, todayKey }: ActivityC
                       name={person.name}
                       color={person.color}
                       photoURL={person.photoURL}
+                      icon={person.icon}
+                      iconSeed={person.id}
                       size="sm"
                     />
                   )}

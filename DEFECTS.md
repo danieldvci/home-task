@@ -5,34 +5,56 @@ under **Open**. When a fix lands, move the item to **Fixed** with the date.
 
 ## Open
 
-### Save does nothing and never says why — reported 2026-09-02
+### A disabled button still will not say what is missing — reported 2026-09-02
 
-A Save click that fails validation returns silently: no toast, no message on
-the field, nothing moves. The user is left guessing which field is at fault, or
-whether the app is broken.
+The other half of the silent-Save defect below. These places do not return in
+silence; they leave the button disabled instead, which on a phone is just as
+mute, because there is no hover to carry a `title`: the quick one-off task modal
+and the manual log modal (`components/TaskModals.tsx`), plus rename-home and
+join-by-code in settings.
 
-Places that behave this way today:
+The handling is the same one the forms now use: keep the button clickable and
+answer on the field with `role="alert"`, `aria-invalid` and a red border, move
+focus there, and repeat it through `showToast`.
 
-| Where | Silent when | Code |
+## Fixed
+
+### Creating a home denied the residents list — fixed 2026-09-29
+
+Creating a household showed up in the local listener before the server had the
+document. The page then subscribed to that home's residents, the rules lookup
+of the household missed, and the error was `Null value error` rather than a
+plain denial. A listener that fails this way does not retry, so the home
+existed and its owner profile was written, but the screen stayed empty of
+people.
+
+The household list now waits until the server copy is in hand before anything
+subscribes under it. The membership check also treats a missing household as
+"not a member" instead of throwing on the missing document.
+
+### Save does nothing and never says why — fixed 2026-09-28
+
+A Save click that failed validation returned silently: no toast, no message on
+the field, nothing moved. The user was left guessing which field was at fault,
+or whether the app was broken. It was the first tap of every household's first
+five minutes, so it read as "this app does not work".
+
+| Where | Was silent when | Code |
 |---|---|---|
 | Chore form, "שמור משימה" | name empty, or nobody on the rotation | `handleSaveChore` in `app/page.tsx` |
 | Resident rename, the check button | name empty | `handleSaveUserEdit` in `app/page.tsx` |
 | Add local resident, the check button | name empty | `handleSaveNewUser` in `app/page.tsx` |
 
-The chore form does raise a toast for one case — custom-days frequency with no
-weekday selected — so it is only the guard in the first `if` that is silent.
+Each guard now names the reason on the offending field (`role="alert"`, red
+border, `aria-invalid`), moves focus there, and repeats it in a toast for
+anyone who has scrolled past. Save stays clickable, so the answer arrives where
+the user is already looking — at the button they just pressed. Typing in the
+field clears the message, so it never outlives the problem.
 
-Two related places hide the reason a different way, by leaving the button
-disabled with nothing explaining what is missing: the quick one-off task modal
-and the manual log modal (`components/TaskModals.tsx`), plus rename-home and
-join-by-code in settings.
+The chore form's two whole-form problems — nobody on the rotation, and
+custom-days with no weekday chosen — cannot point at a single input, so they
+are stated above the Save button instead, in the same words as the toast.
 
-Suggested handling when this is picked up: keep Save clickable, show the reason
-inline on the offending field (`role="alert"`, red border, `aria-invalid`),
-move focus there, and repeat it in a toast for anyone who has scrolled past.
-The toast helper already exists as `showToast` in `components/Toast.tsx`.
-
-## Fixed
 
 ### Paging the week grid marked a day nobody had chosen — fixed 2026-09-23
 

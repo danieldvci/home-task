@@ -26,20 +26,50 @@ service cloud.firestore {
     function householdData(householdId) {
       return get(householdPath(householdId)).data;
     }
+    // exists() before the field read: get() of a household that is not on the
+    // server yet is null, and reading .members off that is an evaluation
+    // error rather than a denial. The same path is one document read.
     function isMember(householdId) {
-      return isSignedIn() && request.auth.uid in householdData(householdId).members;
+      return isSignedIn()
+        && exists(householdPath(householdId))
+        && request.auth.uid in householdData(householdId).members;
     }
     function isOwner(householdId) {
-      return isSignedIn() && request.auth.uid == householdData(householdId).ownerId;
+      return isSignedIn()
+        && exists(householdPath(householdId))
+        && request.auth.uid == householdData(householdId).ownerId;
+    }
+
+    // The owner, or an account the owner promoted. Read with a default because
+    // every household written before co-managers existed has no such field,
+    // and reading a missing key is an error rather than an empty list.
+    // Membership is asked again rather than assumed: a disconnected member is
+    // dropped from `members` in one write and from `managerIds` in another,
+    // and between the two the role must already count for nothing.
+    function isManager(householdId) {
+      return isOwner(householdId)
+        || (isMember(householdId) && request.auth.uid in householdData(householdId).get('managerIds', []));
+    }
+
+    // Managers are a subset of the accounts that can reach the household at
+    // all, so a promotion cannot smuggle in somebody who is not a member.
+    function isValidManagerIds(data) {
+      let ids = data.get('managerIds', []);
+      return ids is list
+        && ids.size() <= 20
+        && data.members.hasAll(ids);
     }
 
     function isValidHousehold(data) {
       let hasName = data.keys().hasAny(['name']);
+      let hasSetup = data.keys().hasAny(['setupComplete']);
       return data.keys().hasAll(['ownerId', 'members'])
-        && data.keys().hasOnly(['ownerId', 'members', 'name'])
+        && data.keys().hasOnly(['ownerId', 'members', 'name', 'managerIds', 'setupComplete'])
         && data.ownerId is string && data.ownerId.size() <= 128
         && data.members is list && data.members.size() > 0 && data.members.size() <= 20
         && data.members[0] is string
+        && isValidManagerIds(data)
+        && (!hasSetup || data.setupComplete is bool)
         && (!hasName || (data.name is string && data.name.size() > 0 && data.name.size() <= 80));
     }
 
@@ -50,11 +80,14 @@ service cloud.firestore {
       let hasUntil = data.keys().hasAny(['absentUntil']);
 
       return data.keys().hasAll(['name', 'color', 'isAbsent', 'linkedAuth'])
-        && data.keys().hasOnly(['name', 'color', 'isAbsent', 'linkedAuth', 'photoURL', 'absentFrom', 'absentUntil'])
+        && data.keys().hasOnly(['name', 'color', 'isAbsent', 'linkedAuth', 'photoURL', 'absentFrom', 'absentUntil', 'icon'])
         && data.name is string && data.name.size() <= 100
         && data.color is string && data.color.size() <= 50
         && data.isAbsent is bool
         && data.linkedAuth is bool
+        // The name of an icon, never an image: a photo is photoURL and wins
+        // over this wherever a resident is drawn.
+        && (!data.keys().hasAny(['icon']) || (data.icon is string && data.icon.size() <= 24))
         && (!hasFrom || data.absentFrom == null || (data.absentFrom is string && data.absentFrom.size() <= 40))
         && (!hasUntil || data.absentUntil == null || (data.absentUntil is string && data.absentUntil.size() <= 40))
         && (!data.keys().hasAny(['photoURL']) || (data.photoURL is string && data.photoURL.size() <= 2000));
@@ -75,10 +108,13 @@ service cloud.firestore {
       let hasOnceDate = data.keys().hasAny(['onceDate']);
       // First day the chore exists; days before it are not occurrences.
       let hasStartDate = data.keys().hasAny(['startDate']);
+      // Name of the icon the chore is drawn with, from a fixed list the client
+      // owns. A chore without one is drawn from its name instead.
+      let hasIcon = data.keys().hasAny(['icon']);
       let baseSize = 4;
       let totalSize = baseSize + (hasCustom ? 1 : 0) + (hasLastComp ? 1 : 0) + (hasCategory ? 1 : 0)
         + (hasLastLog ? 1 : 0) + (hasCompletions ? 1 : 0) + (hasAnchor ? 1 : 0) + (hasOnceDate ? 1 : 0)
-        + (hasStartDate ? 1 : 0);
+        + (hasStartDate ? 1 : 0) + (hasIcon ? 1 : 0);
 
       return data.keys().hasAll(['name', 'frequency', 'rotation', 'currentIndex'])
         && data.keys().size() == totalSize
@@ -94,6 +130,7 @@ service cloud.firestore {
         && (!hasAnchor || (data.anchorDate == null || (data.anchorDate is string && data.anchorDate.size() <= 40)))
         && (!hasOnceDate || (data.onceDate == null || (data.onceDate is string && data.onceDate.size() <= 40)))
         && (!hasStartDate || (data.startDate == null || (data.startDate is string && data.startDate.size() <= 40)))
+        && (!hasIcon || (data.icon == null || (data.icon is string && data.icon.size() <= 24)))
         && (data.frequency != 'once' || (hasOnceDate && data.onceDate is string));
     }
 
@@ -196,7 +233,8 @@ service cloud.firestore {
         && incoming().ownerId == request.auth.uid
         && request.auth.uid in incoming().members;
 
-      // Join (+1 self), owner disconnects other, or self-leave; rename: owner name only
+      // Join (+1 self), owner disconnects other, or self-leave; rename and the
+      // manager list are the owner's; finishing setup is any manager's.
       allow update: if isSignedIn()
         && isValidId(householdId)
         && incoming().ownerId == existing().ownerId
@@ -208,10 +246,28 @@ service cloud.firestore {
           )
           || (
             isOwner(householdId)
-            && incoming().diff(existing()).affectedKeys().hasOnly(['name'])
-            && incoming().name is string
-            && incoming().name.size() > 0
-            && incoming().name.size() <= 80
+            && incoming().diff(existing()).affectedKeys().hasOnly(['name', 'setupComplete'])
+            && (
+              !incoming().diff(existing()).affectedKeys().hasAny(['name'])
+              || (incoming().name is string && incoming().name.size() > 0 && incoming().name.size() <= 80)
+            )
+            && (!incoming().keys().hasAny(['setupComplete']) || incoming().setupComplete is bool)
+            && incoming().members == existing().members
+          )
+          || (
+            // A co-manager may finish the first run, which is the one household
+            // field the everyday admin role needs. Not the name, not the roster.
+            isManager(householdId)
+            && incoming().diff(existing()).affectedKeys().hasOnly(['setupComplete'])
+            && incoming().setupComplete is bool
+            && incoming().members == existing().members
+          )
+          || (
+            // Handing out the role is the owner's alone, or a co-manager could
+            // promote themselves out of every limit the role still has.
+            isOwner(householdId)
+            && incoming().diff(existing()).affectedKeys().hasOnly(['managerIds'])
+            && isValidManagerIds(incoming())
             && incoming().members == existing().members
           )
         );
@@ -229,7 +285,7 @@ service cloud.firestore {
           && isValidId(userId)
           && isValidUser(incoming())
           && (
-            isOwner(householdId)
+            isManager(householdId)
             || (userId == request.auth.uid && incoming().linkedAuth == true)
           );
 
@@ -238,35 +294,35 @@ service cloud.firestore {
           && isValidId(userId)
           && isValidUser(incoming())
           && (
-            isOwner(householdId)
-            || (userId == request.auth.uid && incoming().diff(existing()).affectedKeys().hasOnly(['isAbsent', 'absentFrom', 'absentUntil', 'name', 'photoURL', 'color', 'linkedAuth']))
+            isManager(householdId)
+            || (userId == request.auth.uid && incoming().diff(existing()).affectedKeys().hasOnly(['isAbsent', 'absentFrom', 'absentUntil', 'name', 'photoURL', 'color', 'linkedAuth', 'icon']))
           );
 
-        allow delete: if isOwner(householdId) && isValidId(householdId) && isValidId(userId);
+        allow delete: if isManager(householdId) && isValidId(householdId) && isValidId(userId);
       }
 
       match /chores/{choreId} {
         allow get: if isMember(householdId) && isValidId(householdId) && isValidId(choreId);
         allow list: if isMember(householdId) && isValidId(householdId);
 
-        allow create: if isOwner(householdId)
+        allow create: if isManager(householdId)
           && isValidId(householdId)
           && isValidId(choreId)
           && isValidChoreStrict(incoming());
 
-        // Non-owners may only mark done/undo (turn pointer + completion fields).
-        // Skip/swap (rotation) is owner-only.
+        // A member who manages nothing may only mark done/undo (turn pointer +
+        // completion fields). Skip/swap (rotation) is a manager's.
         allow update: if isMember(householdId)
           && isValidId(householdId)
           && isValidId(choreId)
           && isValidChoreStrict(incoming())
           && (
-            isOwner(householdId)
+            isManager(householdId)
             || incoming().diff(existing()).affectedKeys()
                  .hasOnly(['currentIndex', 'lastCompletedAt', 'lastCompletedLogId', 'completions'])
           );
 
-        allow delete: if isOwner(householdId) && isValidId(householdId) && isValidId(choreId);
+        allow delete: if isManager(householdId) && isValidId(householdId) && isValidId(choreId);
       }
 
       match /logs/{logId} {
@@ -277,7 +333,7 @@ service cloud.firestore {
           && isValidId(logId)
           && isValidLog(incoming());
         // Reactions and comments are the only mutable parts of a log entry;
-        // the owner may additionally prune them for moderation.
+        // a manager may additionally prune them for moderation.
         allow update: if isMember(householdId)
           && isValidId(householdId)
           && isValidId(logId)
@@ -285,11 +341,11 @@ service cloud.firestore {
             (incoming().diff(existing()).affectedKeys().hasOnly(['reactions']) && isReactionUpdate())
             || (incoming().diff(existing()).affectedKeys().hasOnly(['comments']) && isCommentAppend())
             || (
-              isOwner(householdId)
+              isManager(householdId)
               && incoming().diff(existing()).affectedKeys().hasOnly(['reactions', 'comments'])
             )
           );
-        allow delete: if isOwner(householdId) && isValidId(householdId) && isValidId(logId);
+        allow delete: if isManager(householdId) && isValidId(householdId) && isValidId(logId);
       }
     }
   }

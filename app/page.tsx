@@ -85,7 +85,28 @@ import {
 } from '../lib/schedule-view';
 import type { CellState, DropKind, ScheduleFilters } from '../lib/schedule-view';
 import { MOVED_ICON, STATE_ICONS, TRADED_ICON } from '../components/state-icons';
-import { householdDisplayName, profileStorageKey } from '../lib/household-utils';
+import { CHORE_ICONS, USER_ICONS } from '../components/default-icons';
+import { HouseholdSetup } from '../components/HouseholdSetup';
+import type { SetupResult } from '../components/HouseholdSetup';
+import { buildSetupPlan } from '../lib/household-setup';
+import {
+  CHORE_ICON_IDS,
+  USER_ICON_IDS,
+  choreIconId,
+  fallbackUserIcon,
+  isChoreIconId,
+  isUserIconId,
+  userIconId
+} from '../lib/default-icons';
+import type { ChoreIconId, UserIconId } from '../lib/default-icons';
+import {
+  householdDisplayName,
+  householdNeedsSetup,
+  isHouseholdManager,
+  isHouseholdOwner,
+  profileColor,
+  profileStorageKey
+} from '../lib/household-utils';
 import { describeAuthError } from '../lib/auth-errors';
 import { describeChoreChanges, frequencyLabel, joinDetails, clampDetails } from '../lib/activity';
 import type { ChoreFrequency } from '../lib/activity';
@@ -137,6 +158,8 @@ type UserType = {
   absentUntil?: string | null;
   linkedAuth?: boolean;
   photoURL?: string;
+  /** Name of a stored icon. A photo, when there is one, wins over it. */
+  icon?: string;
 };
 const CHORE_CATEGORIES = ['מטבח', 'סלון', 'חדר שינה', 'אמבטיה', 'חוץ', 'אחר'];
 
@@ -196,7 +219,6 @@ const logPhotos = (log: LogType) =>
   log.photoUrls?.length ? log.photoUrls : log.photoUrl ? [log.photoUrl] : [];
 
 const MEMBER_SOFT_LIMIT = 20;
-const ADMIN_ONLY_HINT = 'רק מנהל הבית יכול לבצע פעולה זו';
 const noopSubscribe = () => () => {};
 
 /**
@@ -300,49 +322,6 @@ function DayHeading({
   );
 }
 
-function AdminHint({
-  allowed,
-  hint = ADMIN_ONLY_HINT,
-  className = 'inline-flex',
-  children
-}: {
-  allowed: boolean;
-  hint?: string;
-  className?: string;
-  children: React.ReactNode;
-}) {
-  const { showToast } = useToast();
-  if (allowed) return <span className={className}>{children}</span>;
-
-  // A refusal that cannot be asked for a reason is just a broken button.
-  //
-  // The controls inside carry `disabled:pointer-events-none`, so a hover never
-  // reaches them and this `title` was the only explanation. On a phone there is
-  // no hover, which is where the app is actually used: a member saw a row of
-  // greyed-out controls and no way to find out why. Because the children pass
-  // pointer events through, the tap lands here, and here it can answer.
-  const reason = hint ?? ADMIN_ONLY_HINT;
-  const answer = () => showToast(reason, 'info');
-  return (
-    <span
-      role="button"
-      tabIndex={0}
-      title={reason}
-      aria-label={reason}
-      onClick={answer}
-      onKeyDown={e => {
-        if (e.key === 'Enter' || e.key === ' ') {
-          e.preventDefault();
-          answer();
-        }
-      }}
-      className={`cursor-help ${className ?? ''}`}
-    >
-      {children}
-    </span>
-  );
-}
-
 /**
  * The activity log's action pills.
  *
@@ -384,7 +363,9 @@ export default function ChoresApp() {
     selectHousehold,
     createHousehold,
     renameHousehold,
-    joinHousehold
+    joinHousehold,
+    setHouseholdManagers,
+    markSetupComplete
   } = useHousehold(user);
 
   const [usersSnap, setUsersSnap] = useState<{ householdId: string; users: UserType[] } | null>(null);
@@ -415,9 +396,14 @@ export default function ChoresApp() {
   // task filters, so switching between them changed which tasks were on screen.
   // Empty means "all chores".
   const [choreFilterIds, setChoreFilterIds] = useState<string[]>([]);
-  const isAdmin = !!user && household?.ownerId === user.uid;
-  const adminOnlyTitle = isAdmin ? undefined : ADMIN_ONLY_HINT;
-  const adminDisabledClass = 'disabled:opacity-40 disabled:pointer-events-none';
+  // Two roles, asked separately. `isAdmin` is the everyday one - chores,
+  // residents, and the corrections on a day - and a household can have several
+  // of them, because one parent with a phone should not be the only person who
+  // can fix Tuesday. Everything that decides who gets in, and who else may
+  // manage, stays with the single owner.
+  const isOwner = isHouseholdOwner(household, user?.uid);
+  const isAdmin = isHouseholdManager(household, user?.uid);
+  const managerIds = household?.managerIds ?? [];
   const localUsers = users.filter(u => !u.linkedAuth && u.id !== user?.uid);
   
   // Absence windows start and end on their own, so tick once a minute to keep
@@ -450,6 +436,9 @@ export default function ChoresApp() {
 
   const [editingUserId, setEditingUserId] = useState<string | null>(null);
   const [editUserName, setEditUserName] = useState('');
+  // null means "keep the face drawn from the id", the same deal chores get
+  // with their name.
+  const [editUserIcon, setEditUserIcon] = useState<UserIconId | null>(null);
   const [isAddingUser, setIsAddingUser] = useState(false);
   const [newUserName, setNewUserName] = useState('');
 
@@ -460,6 +449,9 @@ export default function ChoresApp() {
   const [newChoreCustomDays, setNewChoreCustomDays] = useState<number[]>([]);
   const [newChoreUsers, setNewChoreUsers] = useState<string[]>([]);
   const [newChoreCategory, setNewChoreCategory] = useState<string>('');
+  // `null` means "follow the name", which is what an untouched form should do:
+  // typing "כביסה" should not need a second decision about which icon that is.
+  const [newChoreIcon, setNewChoreIcon] = useState<ChoreIconId | null>(null);
   const [joinCode, setJoinCode] = useState('');
   const [pendingDoneChoreId, setPendingDoneChoreId] = useState<string | null>(null);
   const [pendingSkipChoreId, setPendingSkipChoreId] = useState<string | null>(null);
@@ -479,6 +471,15 @@ export default function ChoresApp() {
   const [newHomeName, setNewHomeName] = useState('');
   const [renameHomeName, setRenameHomeName] = useState('');
   const [homeActionBusy, setHomeActionBusy] = useState(false);
+  const [setupBusy, setSetupBusy] = useState(false);
+  const [setupError, setSetupError] = useState<string | null>(null);
+  // Why a Save did nothing. It used to do nothing silently, which left the
+  // user guessing which field was at fault or whether the app was broken.
+  const [userFormError, setUserFormError] = useState<string | null>(null);
+  const [choreFormError, setChoreFormError] = useState<string | null>(null);
+  const newUserNameRef = useRef<HTMLInputElement>(null);
+  const editUserNameRef = useRef<HTMLInputElement>(null);
+  const choreNameRef = useRef<HTMLInputElement>(null);
   const avatarInputRef = useRef<HTMLInputElement>(null);
   const [avatarUploadTargetId, setAvatarUploadTargetId] = useState<string | null>(null);
   const [avatarUploadRequestId, setAvatarUploadRequestId] = useState(0);
@@ -849,6 +850,84 @@ export default function ChoresApp() {
     );
   }
 
+  // The first run, for a household that has just been created.
+  //
+  // Only a manager is shown it: somebody joining with the house code while the
+  // owner is still halfway through the wizard should land in the app, not in
+  // somebody else's setup. A household with no `setupComplete` field at all
+  // predates the wizard and is never sent through it.
+  const finishSetup = async (result: SetupResult) => {
+    if (!householdId || !user || !isAdmin) return;
+    setSetupBusy(true);
+    setSetupError(null);
+    try {
+      const plan = buildSetupPlan(
+        { residents: result.residents, chores: result.chores },
+        today,
+        [user.uid]
+      );
+      // One batch: residents and the chores whose rotations name them are the
+      // same fact, and half of it is a household nobody can use.
+      const batch = writeBatch(db);
+      for (const resident of plan.users) {
+        batch.set(doc(db, 'households', householdId, 'users', resident.id), resident.data);
+      }
+      for (const chore of plan.chores) {
+        batch.set(doc(db, 'households', householdId, 'chores', chore.id), chore.data);
+      }
+      const patch: { setupComplete: boolean; name?: string } = { setupComplete: true };
+      const trimmedName = result.name.trim().slice(0, 80);
+      if (isOwner && trimmedName && trimmedName !== household?.name) patch.name = trimmedName;
+      batch.update(doc(db, 'households', householdId), patch);
+      await batch.commit();
+      setActiveTab('tasks');
+      showToast('הבית מוכן, אפשר להתחיל', 'success');
+    } catch (err) {
+      console.error(err);
+      // The draft stays on screen: a failed save must not also lose the work.
+      setSetupError('שמירת ההגדרות נכשלה. הפרטים נשמרו כאן, אפשר לנסות שוב.');
+    } finally {
+      setSetupBusy(false);
+    }
+  };
+
+  const skipSetup = async () => {
+    if (!householdId) return;
+    setSetupBusy(true);
+    setSetupError(null);
+    try {
+      await markSetupComplete(householdId);
+    } catch (err) {
+      console.error(err);
+      setSetupError('לא הצלחנו לדלג. אפשר לנסות שוב.');
+    } finally {
+      setSetupBusy(false);
+    }
+  };
+
+  // `currentUserId` also gates this, so the wizard opens with the owner's own
+  // profile already loaded rather than flashing a placeholder name at them.
+  if (householdId && household && currentUserId && householdNeedsSetup(household) && isAdmin) {
+    const ownerProfile = users.find(u => u.id === user.uid);
+    return (
+      <HouseholdSetup
+        householdName={household.name ?? ''}
+        houseCode={householdId}
+        owner={{
+          id: user.uid,
+          name: ownerProfile?.name || user.displayName?.trim() || 'אני',
+          color: ownerProfile?.color || 'bg-[#A1C181]',
+          photoURL: resolvePhoto(ownerProfile),
+          icon: ownerProfile?.icon
+        }}
+        busy={setupBusy}
+        error={setupError}
+        onFinish={finishSetup}
+        onSkip={skipSetup}
+      />
+    );
+  }
+
   // The days the selector offers. Anchored on today, but it follows the
   // selection out of that range rather than leaving the day view showing a date
   // no button matches.
@@ -1128,6 +1207,9 @@ export default function ChoresApp() {
       }
 
       setPendingDoneChoreId(null);
+      // Undo lives on the card the tap just produced, and stays there: a toast
+      // is four seconds and a misplaced tap is noticed later than that.
+      showToast('סומן כבוצע · אפשר לבטל בכרטיס', 'success');
       if (photos.length === 0) return;
 
       const { baseDetails, context, logPayload } = result;
@@ -1220,6 +1302,11 @@ export default function ChoresApp() {
     if (!householdId || !isAdmin || actionBusy) return;
     const chore = chores.find(c => c.id === choreId);
     if (!chore) return;
+
+    // Asked here and no longer asked on "done", which is the way round these
+    // two belong: writing a day off rewrites the record and only a manager can
+    // put it back, while marking done is undone from the card it produces.
+    if (!confirm(`לסגור את "${chore.name}" ליום זה בלי שבוצע? הרישום יישאר כ"ויתרנו".`)) return;
 
     const preview = resolveDayAssignee(chore, users, selectedDate, today);
     if (preview.done) {
@@ -1557,7 +1644,17 @@ export default function ChoresApp() {
   };
 
   const handleSaveUserEdit = async () => {
-    if (!isAdmin || !householdId || !editingUserId || !editUserName.trim()) return;
+    if (!isAdmin || !householdId || !editingUserId) return;
+    // A Save that does nothing has to say why. It used to return here in
+    // silence, leaving the user to guess whether the field or the app was at
+    // fault - the reason is on the field, in a toast, and the focus goes back
+    // to what needs fixing.
+    if (!editUserName.trim()) {
+      setUserFormError('צריך שם לדייר');
+      showToast('צריך שם לדייר', 'info');
+      editUserNameRef.current?.focus();
+      return;
+    }
     const u = users.find(x => x.id === editingUserId);
     if (!u) return;
     try {
@@ -1568,10 +1665,13 @@ export default function ChoresApp() {
         absentFrom: u.absentFrom ?? null,
         absentUntil: u.absentUntil ?? null,
         linkedAuth: u.linkedAuth ?? false,
-        ...(u.photoURL ? { photoURL: u.photoURL } : {})
+        ...(u.photoURL ? { photoURL: u.photoURL } : {}),
+        ...(editUserIcon ? { icon: editUserIcon } : u.icon ? { icon: u.icon } : {})
       });
       setEditingUserId(null);
       setEditUserName('');
+      setEditUserIcon(null);
+      setUserFormError(null);
     } catch (err) {
       console.error(err);
       showToast('שמירת השינוי נכשלה');
@@ -1579,23 +1679,31 @@ export default function ChoresApp() {
   };
 
   const handleSaveNewUser = async () => {
-    if (!isAdmin || !householdId || !newUserName.trim()) return;
+    if (!isAdmin || !householdId) return;
+    if (!newUserName.trim()) {
+      setUserFormError('צריך שם לדייר');
+      showToast('צריך שם לדייר', 'info');
+      newUserNameRef.current?.focus();
+      return;
+    }
     if (users.length >= MEMBER_SOFT_LIMIT) {
       showToast(`הגעתם למגבלת ${MEMBER_SOFT_LIMIT} דיירים בבית`);
       return;
     }
-    const colors = ['bg-[#A1C181]', 'bg-[#D4CBBF]', 'bg-[#8C7E6A]', 'bg-[#B99543]', 'bg-[#E5989B]', 'bg-[#81B29A]', 'bg-[#E07A5F]', 'bg-[#3D5A80]'];
-    const randomColor = colors[Math.floor(Math.random() * colors.length)];
     const newId = `u${Date.now()}`;
     try {
       await setDoc(doc(db, 'households', householdId, 'users', newId), {
         name: newUserName.trim(),
-        color: randomColor,
+        // Derived from the id rather than drawn at random, so the same
+        // resident looks the same on every device.
+        color: profileColor(newId),
         isAbsent: false,
-        linkedAuth: false
+        linkedAuth: false,
+        icon: fallbackUserIcon(newId)
       });
       setIsAddingUser(false);
       setNewUserName('');
+      setUserFormError(null);
     } catch (err) {
       console.error(err);
       showToast('הוספת הדייר נכשלה');
@@ -1641,9 +1749,36 @@ export default function ChoresApp() {
     }
   };
 
-  // Admin removes a Google-linked member; they must rejoin with the house code.
+  // Hand the everyday admin to somebody else, or take it back. Only accounts
+  // can hold it, and only the owner can grant it.
+  const toggleManager = async (userId: string, makeManager: boolean) => {
+    if (!isOwner || !householdId || !household) return;
+    const target = users.find(u => u.id === userId);
+    const next = makeManager
+      ? [...managerIds, userId]
+      : managerIds.filter(id => id !== userId);
+    setHomeActionBusy(true);
+    try {
+      await setHouseholdManagers(householdId, next);
+      await logAction(
+        makeManager ? 'מינוי מנהל' : 'ביטול מינוי מנהל',
+        makeManager
+          ? `מינה/תה את ${target?.name ?? 'החבר/ה'} לניהול הבית`
+          : `הסיר/ה מ${target?.name ?? 'החבר/ה'} את ניהול הבית`
+      );
+    } catch (err) {
+      console.error(err);
+      showToast('שינוי ההרשאה נכשל');
+    } finally {
+      setHomeActionBusy(false);
+    }
+  };
+
+  // The owner removes a Google-linked member; they must rejoin with the house
+  // code. Membership and the manager list are two writes, because the rules
+  // only accept one kind of change to the household document at a time.
   const handleDisconnectMember = async (userId: string) => {
-    if (!isAdmin || !householdId || !user || !household) return;
+    if (!isOwner || !householdId || !user || !household) return;
     if (userId === user.uid) {
       showToast('לא ניתן לנתק את עצמך מהבית');
       return;
@@ -1674,6 +1809,14 @@ export default function ChoresApp() {
     try {
       await removeUserFromChores(userId);
       await deleteDoc(doc(db, 'households', householdId, 'users', userId));
+      if (managerIds.includes(userId)) {
+        // Dropped first: the rules ignore a manager who is no longer a member,
+        // but a stale id left behind would come back with them if they rejoin.
+        await setHouseholdManagers(
+          householdId,
+          managerIds.filter(id => id !== userId)
+        );
+      }
       await updateDoc(doc(db, 'households', householdId), {
         members: household.members.filter(id => id !== userId)
       });
@@ -1704,6 +1847,7 @@ export default function ChoresApp() {
         anchorDate: onceDate
       };
       if (source?.category) choreData.category = source.category;
+      if (isChoreIconId(source?.icon)) choreData.icon = source.icon;
       await setDoc(doc(db, 'households', householdId, 'chores', cid), choreData);
       await logAction(
         'יצירת משימה',
@@ -1748,15 +1892,34 @@ export default function ChoresApp() {
     setNewChoreCustomDays(chore.customDays || []);
     setNewChoreUsers(chore.rotation || []);
     setNewChoreCategory(chore.category || '');
+    // A chore drawn from its name keeps being drawn from its name until
+    // somebody picks otherwise, so an edit does not freeze today's guess.
+    setNewChoreIcon(isChoreIconId(chore.icon) ? chore.icon : null);
+    setChoreFormError(null);
     setIsAddingChore(true);
   };
 
   const handleSaveChore = async () => {
-    if (!isAdmin || !householdId || !newChoreName.trim() || newChoreUsers.length === 0) return;
-    if (newChoreFreq === 'custom_days' && newChoreCustomDays.length === 0) {
-      showToast('יש לבחור לפחות יום אחד למשימה עם ימים ספציפיים');
+    if (!isAdmin || !householdId) return;
+    // Each of these used to be a silent `return`, so the button moved nothing
+    // and said nothing.
+    if (!newChoreName.trim()) {
+      setChoreFormError('צריך שם למשימה');
+      showToast('צריך שם למשימה', 'info');
+      choreNameRef.current?.focus();
       return;
     }
+    if (newChoreUsers.length === 0) {
+      setChoreFormError('צריך לבחור לפחות משתתף אחד לסבב');
+      showToast('צריך לבחור לפחות משתתף אחד לסבב', 'info');
+      return;
+    }
+    if (newChoreFreq === 'custom_days' && newChoreCustomDays.length === 0) {
+      setChoreFormError('יש לבחור לפחות יום אחד למשימה עם ימים ספציפיים');
+      showToast('יש לבחור לפחות יום אחד למשימה עם ימים ספציפיים', 'info');
+      return;
+    }
+    setChoreFormError(null);
     const cid = editingChoreId || `c${crypto.randomUUID().split('-')[0]}`;
     const existingChore = editingChoreId ? chores.find(c => c.id === editingChoreId) : undefined;
     // Re-point currentIndex at whoever currently holds the turn, since editing
@@ -1796,7 +1959,11 @@ export default function ChoresApp() {
       startDate:
         editingChoreId && existingChore
           ? existingChore.startDate || null
-          : normalizeDay(today).toISOString()
+          : normalizeDay(today).toISOString(),
+      // Only written when it was actually chosen. Left off, the chore is drawn
+      // from its name, which is the right answer for almost every chore and
+      // stays right if the name changes.
+      icon: newChoreIcon
     };
 
     // Clean up nulls for firestore strict rules if needed, though blueprint accepts them
@@ -1804,6 +1971,7 @@ export default function ChoresApp() {
     if (!choreData.category) delete (choreData as any).category;
     if (!choreData.onceDate) delete (choreData as any).onceDate;
     if (!choreData.startDate) delete (choreData as any).startDate;
+    if (!choreData.icon) delete (choreData as any).icon;
     
     try {
       if (editingChoreId) {
@@ -1841,6 +2009,8 @@ export default function ChoresApp() {
     setNewChoreCustomDays([]);
     setNewChoreUsers([]);
     setNewChoreCategory('');
+    setNewChoreIcon(null);
+    setChoreFormError(null);
   };
 
   const toggleCustomDay = (day: number) => {
@@ -1937,7 +2107,16 @@ export default function ChoresApp() {
   const personFilterOptions = users.map(u => ({
     id: u.id,
     label: u.id === currentUserId ? `${u.name} (אני)` : u.name,
-    icon: <Avatar name={u.name} color={u.color} photoURL={resolvePhoto(u)} size="sm" />
+    icon: (
+      <Avatar
+        name={u.name}
+        color={u.color}
+        photoURL={resolvePhoto(u)}
+        icon={u.icon}
+        iconSeed={u.id}
+        size="sm"
+      />
+    )
   }));
 
   if (pickingProfile) {
@@ -1957,6 +2136,8 @@ export default function ChoresApp() {
                 name={users.find(u => u.id === user.uid)?.name || user.displayName || 'אני'}
                 color={users.find(u => u.id === user.uid)?.color || 'bg-[#A1C181]'}
                 photoURL={resolvePhoto(users.find(u => u.id === user.uid))}
+                icon={users.find(u => u.id === user.uid)?.icon}
+                iconSeed={user.uid}
                 size="lg"
               />
               <span className="text-lg font-medium text-[#4A443F]">אני</span>
@@ -1970,7 +2151,14 @@ export default function ChoresApp() {
               onClick={() => selectActingProfile(u.id)}
               className="flex flex-col items-center justify-center p-6 bg-white rounded-3xl shadow-sm border border-[#E6E0D4] gap-4 hover:border-[#A1C181]"
             >
-              <Avatar name={u.name} color={u.color} photoURL={resolvePhoto(u)} size="lg" />
+              <Avatar
+                name={u.name}
+                color={u.color}
+                photoURL={resolvePhoto(u)}
+                icon={u.icon}
+                iconSeed={u.id}
+                size="lg"
+              />
               <span className="text-lg font-medium text-[#4A443F]">{u.name}</span>
             </motion.button>
           ))}
@@ -2042,6 +2230,31 @@ export default function ChoresApp() {
           onBackToToday={() => setSelectedDate(today)}
         />
 
+        {/* Who the next tap will be recorded as.
+            A household where one parent marks everything for everyone lives or
+            dies on this being one tap from the tasks, and it used to live two
+            tabs away in settings - so the alternative was signing the child in,
+            which is exactly what a local resident exists to avoid. */}
+        {localUsers.length > 0 && (
+          <button
+            type="button"
+            onClick={() => setPickingProfile(true)}
+            className="flex items-center gap-2 self-start max-w-full px-3 py-2 rounded-2xl bg-card border border-line text-sm hover:bg-subtle transition-colors"
+          >
+            <span className="text-xs font-bold text-ink-muted flex-shrink-0">פועל בשם</span>
+            <Avatar
+              name={currentUser?.name || '?'}
+              color={currentUser?.color || 'bg-avatar-empty'}
+              photoURL={resolvePhoto(currentUser)}
+              icon={currentUser?.icon}
+              iconSeed={currentUser?.id}
+              size="sm"
+            />
+            <span className="font-bold text-ink truncate">{currentUser?.name}</span>
+            <span className="text-xs font-bold text-accent flex-shrink-0">החלף</span>
+          </button>
+        )}
+
         {/* Choosing what to look at is one decision, so it reads as one block.
             Stacked at the section gap plus a margin each, these four bars cost
             most of a phone screen before the first task appeared. */}
@@ -2062,7 +2275,14 @@ export default function ChoresApp() {
                   onClick={() => setSelectedUserId(u.id)}
                   className={`flex-shrink-0 flex items-center gap-2 px-3 py-1.5 rounded-2xl transition-all border ${isSelected ? 'bg-white border-[#A1C181] shadow-sm ring-1 ring-[#A1C181]/50' : 'bg-white border-[#E6E0D4] opacity-70 hover:opacity-100 hover:bg-[#F3EFE9]'}`}
                 >
-                  <Avatar name={u.name} color={u.color} photoURL={resolvePhoto(u)} size="sm" />
+                  <Avatar
+                    name={u.name}
+                    color={u.color}
+                    photoURL={resolvePhoto(u)}
+                    icon={u.icon}
+                    iconSeed={u.id}
+                    size="sm"
+                  />
                   <span className={`text-sm font-medium ${isSelected ? 'text-[#3D3732]' : 'text-[#8C7E6A]'}`}>
                     {u.id === currentUserId ? 'אני' : u.name}
                   </span>
@@ -2304,6 +2524,22 @@ export default function ChoresApp() {
                         chore it is. */}
                     <div>
                       <div className="flex items-center gap-2 flex-wrap">
+                        {/* The chore in one glyph, resolved through the same
+                            table the setup wizard and the chore list read, so
+                            a task looks like itself wherever it appears. */}
+                        {(() => {
+                          const ChoreGlyph = CHORE_ICONS[choreIconId(chore)];
+                          return (
+                            <span
+                              aria-hidden="true"
+                              className={`w-8 h-8 rounded-2xl flex items-center justify-center flex-shrink-0 ${
+                                done ? 'bg-white/60 text-ink-faint' : 'bg-inset text-ink-mid'
+                              }`}
+                            >
+                              <ChoreGlyph className="w-4 h-4" />
+                            </span>
+                          );
+                        })()}
                         <h3
                           className={`text-lg font-bold break-words ${done ? 'text-ink-mid' : 'text-ink'}`}
                         >
@@ -2423,6 +2659,8 @@ export default function ChoresApp() {
                                       name={u.name}
                                       color={u.color}
                                       photoURL={resolvePhoto(u)}
+                                      icon={u.icon}
+                                      iconSeed={u.id}
                                       size={isCurrent ? 'md' : 'sm'}
                                       title={u.name}
                                       className={`border-2 border-[#F3EFE9] ${isCurrent ? 'z-10 relative ring-1 ring-[#A1C181]/50' : 'opacity-60 -ml-2 relative scale-90 z-0'}`}
@@ -2441,6 +2679,8 @@ export default function ChoresApp() {
                               name={assignee.name}
                               color={assignee.color}
                               photoURL={resolvePhoto(assignee)}
+                              icon={assignee.icon}
+                              iconSeed={assignee.id}
                               size="md"
                               title={assignee.name}
                             />
@@ -2513,52 +2753,62 @@ export default function ChoresApp() {
                   ) : canMarkDone ? (
                     <div className="flex flex-col gap-2">
                     <div className="flex gap-2">
+                      {/* The most frequent and most reversible act in the app,
+                          so it costs one tap. It used to open a dialog to ask
+                          whether it was meant, and to offer the camera; the
+                          camera is the button beside it now and the undo is on
+                          the card this produces. */}
                       <button
-                        onClick={() => setPendingDoneChoreId(chore.id)}
-                        className="flex-1 flex items-center justify-center gap-2 py-4 bg-[#A1C181] text-white rounded-2xl text-base font-extrabold shadow-md shadow-[#A1C181]/40 hover:bg-[#8eab72] hover:shadow-lg active:scale-[0.98] transition-all"
+                        onClick={() => completeDone(chore.id, [])}
+                        disabled={actionBusy}
+                        className="flex-1 flex items-center justify-center gap-2 py-4 bg-[#A1C181] text-white rounded-2xl text-base font-extrabold shadow-md shadow-[#A1C181]/40 hover:bg-[#8eab72] hover:shadow-lg active:scale-[0.98] transition-all disabled:opacity-60"
                       >
                         <CheckCircle2 className="w-6 h-6" />
                         בוצע
                       </button>
-                      {/* A one-off has a single-person rotation, so skipping or
+                      <button
+                        onClick={() => setPendingDoneChoreId(chore.id)}
+                        disabled={actionBusy}
+                        title="סמן בוצע עם תמונה"
+                        aria-label="סמן בוצע עם תמונה"
+                        className="flex items-center justify-center px-3.5 border border-[#E6E0D4] text-[#8C7E6A] rounded-2xl hover:bg-[#F3EFE9] active:scale-[0.98] transition-all disabled:opacity-40"
+                      >
+                        <Camera className="w-4 h-4" />
+                      </button>
+                      {/* Corrections are a manager's, and a resident who will
+                          never be allowed one should not be looking at it.
+                          A one-off has a single-person rotation, so skipping or
                           swapping has nothing to move it to; dropping it is the
                           only sensible correction. */}
-                      {chore.frequency === 'once' ? (
-                        isAdmin && (
-                          <button
-                            onClick={() => handleDeleteChore(chore.id)}
-                            title="מחק משימה חד פעמית"
-                            aria-label="מחק משימה חד פעמית"
-                            className="flex items-center justify-center px-3.5 border border-[#E6E0D4] text-rose-400 rounded-2xl hover:bg-rose-50 active:scale-[0.98] transition-all"
-                          >
-                            <Trash2 className="w-4 h-4" />
-                          </button>
-                        )
-                      ) : (
-                        <AdminHint allowed={isAdmin} hint="רק מנהל הבית יכול לדלג / להחליף תור">
-                          <button
-                            onClick={() => setPendingSkipChoreId(chore.id)}
-                            disabled={!isAdmin}
-                            title={isAdmin ? 'דלג' : 'רק מנהל הבית יכול לדלג / להחליף תור'}
-                            aria-label={isAdmin ? 'דלג' : 'רק מנהל הבית יכול לדלג / להחליף תור'}
-                            className={`flex items-center justify-center px-3.5 border border-[#E6E0D4] text-[#8C7E6A] rounded-2xl hover:bg-[#F3EFE9] active:scale-[0.98] transition-all ${adminDisabledClass}`}
-                          >
-                            <FastForward className="w-4 h-4" />
-                          </button>
-                        </AdminHint>
+                      {isAdmin && chore.frequency === 'once' && (
+                        <button
+                          onClick={() => handleDeleteChore(chore.id)}
+                          title="מחק משימה חד פעמית"
+                          aria-label="מחק משימה חד פעמית"
+                          className="flex items-center justify-center px-3.5 border border-[#E6E0D4] text-rose-400 rounded-2xl hover:bg-rose-50 active:scale-[0.98] transition-all"
+                        >
+                          <Trash2 className="w-4 h-4" />
+                        </button>
                       )}
-                      {chore.rotation && chore.rotation.length > 1 && (
-                        <AdminHint allowed={isAdmin} hint="רק מנהל הבית יכול לדלג / להחליף תור">
-                          <button
-                            onClick={() => setPendingSwapChoreId(chore.id)}
-                            disabled={!isAdmin}
-                            title={isAdmin ? 'החלף תור' : 'רק מנהל הבית יכול לדלג / להחליף תור'}
-                            aria-label={isAdmin ? 'החלף תור' : 'רק מנהל הבית יכול לדלג / להחליף תור'}
-                            className={`flex items-center justify-center px-3.5 border border-[#E6E0D4] text-[#8C7E6A] rounded-2xl hover:bg-[#F3EFE9] active:scale-[0.98] transition-all ${adminDisabledClass}`}
-                          >
-                            <Repeat className="w-4 h-4" />
-                          </button>
-                        </AdminHint>
+                      {isAdmin && chore.frequency !== 'once' && (
+                        <button
+                          onClick={() => setPendingSkipChoreId(chore.id)}
+                          title="דלג"
+                          aria-label="דלג"
+                          className="flex items-center justify-center px-3.5 border border-[#E6E0D4] text-[#8C7E6A] rounded-2xl hover:bg-[#F3EFE9] active:scale-[0.98] transition-all"
+                        >
+                          <FastForward className="w-4 h-4" />
+                        </button>
+                      )}
+                      {isAdmin && chore.rotation && chore.rotation.length > 1 && (
+                        <button
+                          onClick={() => setPendingSwapChoreId(chore.id)}
+                          title="החלף תור"
+                          aria-label="החלף תור"
+                          className="flex items-center justify-center px-3.5 border border-[#E6E0D4] text-[#8C7E6A] rounded-2xl hover:bg-[#F3EFE9] active:scale-[0.98] transition-all"
+                        >
+                          <Repeat className="w-4 h-4" />
+                        </button>
                       )}
                     </div>
                     {/* The two corrections, both admin-only and both worth a
@@ -2754,6 +3004,8 @@ export default function ChoresApp() {
                           name={logUser?.name || '?'}
                           color={logUser?.color || 'bg-[#D4CBBF]'}
                           photoURL={resolvePhoto(logUser)}
+                          icon={logUser?.icon}
+                          iconSeed={logUser?.id}
                           size="md"
                           className="flex-shrink-0"
                         />
@@ -2762,17 +3014,16 @@ export default function ChoresApp() {
                             <span className="font-bold text-[#3D3732] truncate">{logUser?.name || 'משתמש לא ידוע'}</span>
                             <div className="flex items-center gap-2 flex-shrink-0">
                               <span className="text-xs font-medium text-[#A39788] whitespace-nowrap">{timeStr}</span>
-                              <AdminHint allowed={isAdmin}>
+                              {isAdmin && (
                                 <button
                                   onClick={() => setPendingDeleteLogId(log.id)}
-                                  disabled={!isAdmin}
-                                  title={isAdmin ? 'מחק רשומה' : adminOnlyTitle}
-                                  aria-label={isAdmin ? 'מחק רשומה' : adminOnlyTitle}
-                                  className={`p-1 text-rose-400 hover:bg-rose-50 rounded-lg transition-colors ${adminDisabledClass}`}
+                                  title="מחק רשומה"
+                                  aria-label="מחק רשומה"
+                                  className="p-1 text-rose-400 hover:bg-rose-50 rounded-lg transition-colors"
                                 >
                                   <Trash2 className="w-3.5 h-3.5" />
                                 </button>
-                              </AdminHint>
+                              )}
                             </div>
                           </div>
                           <span className={`inline-flex items-center gap-1 mt-1 text-[11px] font-bold px-2 py-0.5 rounded-lg ${actionClass}`}>
@@ -2856,15 +3107,53 @@ export default function ChoresApp() {
       </div>
 
       <div>
-        <label className="text-sm font-bold text-[#6B5E4C] block mb-1">שם המשימה</label>
-        <input 
-          type="text" 
+        <label className="text-sm font-bold text-[#6B5E4C] block mb-1" htmlFor="chore-name">
+          שם המשימה
+        </label>
+        <input
+          id="chore-name"
+          ref={choreNameRef}
+          type="text"
           value={newChoreName}
-          onChange={(e) => setNewChoreName(e.target.value)}
+          onChange={(e) => {
+            setNewChoreName(e.target.value);
+            if (choreFormError) setChoreFormError(null);
+          }}
           maxLength={100}
           placeholder="לדוגמה: שאיבת אבק"
-          className="w-full bg-[#FAF9F6] border border-[#E6E0D4] rounded-xl px-4 py-2 text-[#3D3732] outline-none focus:border-[#A1C181] transition-colors"
+          aria-invalid={!!choreFormError && !newChoreName.trim()}
+          className={`w-full bg-[#FAF9F6] border rounded-xl px-4 py-2 text-[#3D3732] outline-none focus:border-[#A1C181] transition-colors ${
+            choreFormError && !newChoreName.trim() ? 'border-danger' : 'border-[#E6E0D4]'
+          }`}
         />
+      </div>
+
+      {/* The icon follows the name until somebody says otherwise, so the
+          common case needs no decision at all. */}
+      <div>
+        <label className="text-sm font-bold text-[#6B5E4C] block mb-2">אייקון</label>
+        <div className="flex flex-wrap gap-2">
+          {CHORE_ICON_IDS.map(iconId => {
+            const Glyph = CHORE_ICONS[iconId];
+            const active = (newChoreIcon ?? choreIconId({ name: newChoreName })) === iconId;
+            return (
+              <button
+                key={iconId}
+                type="button"
+                onClick={() => setNewChoreIcon(active && newChoreIcon ? null : iconId)}
+                aria-pressed={active}
+                aria-label={`אייקון ${iconId}`}
+                className={`w-10 h-10 rounded-2xl flex items-center justify-center border transition-colors ${
+                  active
+                    ? 'bg-[#A1C181] text-white border-[#A1C181]'
+                    : 'bg-[#FAF9F6] text-[#8C7E6A] border-[#E6E0D4] hover:bg-[#F3EFE9]'
+                }`}
+              >
+                <Glyph className="w-4 h-4" />
+              </button>
+            );
+          })}
+        </div>
       </div>
       
       <div>
@@ -2942,6 +3231,8 @@ export default function ChoresApp() {
                       name={u.name}
                       color={u.color}
                       photoURL={resolvePhoto(u)}
+                      icon={u.icon}
+                      iconSeed={u.id}
                       size="sm"
                       className="!w-8 !h-8 !text-sm"
                     />
@@ -2991,6 +3282,15 @@ export default function ChoresApp() {
           )}
         </div>
       </div>
+
+      {/* Save stays clickable and answers instead: a button that is disabled
+          for a reason it does not give is the same dead end as one that
+          returns silently. */}
+      {choreFormError && (
+        <p role="alert" className="text-sm font-medium text-danger">
+          {choreFormError}
+        </p>
+      )}
 
       <div className="flex gap-2 mt-2">
         <button 
@@ -3042,6 +3342,8 @@ export default function ChoresApp() {
                       name={currentUser?.name || '?'}
                       color={currentUser?.color || 'bg-[#D4CBBF]'}
                       photoURL={resolvePhoto(currentUser)}
+                      icon={currentUser?.icon}
+                      iconSeed={currentUser?.id}
                       size="lg"
                       className="!w-12 !h-12 !text-lg"
                     />
@@ -3136,28 +3438,25 @@ export default function ChoresApp() {
 
           {householdId && (
             <div className="flex flex-col gap-2 pt-2 border-t border-[#E6E0D4]">
+              {/* Renaming the home is the owner's, and a member who can never
+                  do it is shown the name rather than a field that refuses. */}
               <p className="text-xs font-bold text-[#8C7E6A]">שם הבית הפעיל</p>
-              <div className="flex gap-2">
-                <AdminHint allowed={isAdmin} className="flex-1 inline-flex min-w-0">
+              {isOwner ? (
+                <div className="flex gap-2">
                   <input
                     type="text"
                     value={renameHomeName}
                     onChange={(e) => setRenameHomeName(e.target.value)}
                     placeholder={householdDisplayName(household!)}
                     maxLength={80}
-                    disabled={!isAdmin}
-                    title={adminOnlyTitle}
-                    aria-label={isAdmin ? 'שם הבית' : adminOnlyTitle}
-                    className={`w-full bg-[#FAF9F6] border border-[#E6E0D4] rounded-xl px-3 py-2 text-sm text-[#3D3732] outline-none focus:border-[#A1C181] ${adminDisabledClass}`}
+                    aria-label="שם הבית"
+                    className="flex-1 min-w-0 bg-[#FAF9F6] border border-[#E6E0D4] rounded-xl px-3 py-2 text-sm text-[#3D3732] outline-none focus:border-[#A1C181]"
                   />
-                </AdminHint>
-                <AdminHint allowed={isAdmin}>
                   <button
-                    disabled={!isAdmin || homeActionBusy || !renameHomeName.trim()}
-                    title={adminOnlyTitle}
-                    aria-label={isAdmin ? 'שמור שם בית' : adminOnlyTitle}
+                    disabled={homeActionBusy || !renameHomeName.trim()}
+                    aria-label="שמור שם בית"
                     onClick={async () => {
-                      if (!householdId || !isAdmin) return;
+                      if (!householdId || !isOwner) return;
                       setHomeActionBusy(true);
                       try {
                         await renameHousehold(householdId, renameHomeName);
@@ -3168,12 +3467,14 @@ export default function ChoresApp() {
                         setHomeActionBusy(false);
                       }
                     }}
-                    className={`px-3 py-2 bg-[#3D5A80] text-white text-sm font-bold rounded-xl ${adminDisabledClass}`}
+                    className="px-3 py-2 bg-[#3D5A80] text-white text-sm font-bold rounded-xl disabled:opacity-40"
                   >
                     שמור
                   </button>
-                </AdminHint>
-              </div>
+                </div>
+              ) : (
+                <p className="text-sm font-bold text-[#3D3732]">{householdDisplayName(household!)}</p>
+              )}
 
               <p className="text-xs font-bold text-[#8C7E6A] mt-2">צור בית נוסף</p>
               <div className="flex gap-2">
@@ -3286,7 +3587,12 @@ export default function ChoresApp() {
           defaultOpen
         >
           {!isAdmin && (
-            <p className="text-xs text-[#8C7E6A] -mt-1">רק מנהל הבית יכול להוסיף או לערוך דיירים מקומיים</p>
+            <p className="text-xs text-[#8C7E6A] -mt-1">רק מנהל/ת הבית יכול/ה להוסיף או לערוך דיירים מקומיים</p>
+          )}
+          {isOwner && (
+            <p className="text-xs text-[#8C7E6A] -mt-1">
+              אפשר למנות עוד מנהלים מבין המחוברים עם גוגל, כדי שלא רק אתה תסמן ותתקן.
+            </p>
           )}
           {users.length >= MEMBER_SOFT_LIMIT - 2 && (
             <p className={`text-xs font-medium -mt-1 flex items-center gap-1 ${users.length >= MEMBER_SOFT_LIMIT ? 'text-rose-600' : 'text-[#B99543]'}`}>
@@ -3300,14 +3606,58 @@ export default function ChoresApp() {
             {users.map(u => {
               if (editingUserId === u.id) {
                 return (
-                  <div key={u.id} className="flex items-center justify-between p-4 gap-3 bg-[#FAF9F6]">
-                    <input
-                      type="text"
-                      value={editUserName}
-                      onChange={(e) => setEditUserName(e.target.value)}
-                      className="flex-1 bg-white border border-[#E6E0D4] rounded-xl px-4 py-2 text-[#3D3732] outline-none focus:border-[#A1C181]"
-                      autoFocus
-                    />
+                  <div key={u.id} className="flex items-start justify-between p-4 gap-3 bg-[#FAF9F6]">
+                    <div className="flex-1 flex flex-col gap-2">
+                      <input
+                        ref={editUserNameRef}
+                        type="text"
+                        value={editUserName}
+                        onChange={(e) => {
+                          setEditUserName(e.target.value);
+                          if (userFormError) setUserFormError(null);
+                        }}
+                        aria-invalid={!!userFormError}
+                        aria-label="שם הדייר"
+                        className={`w-full bg-white border rounded-xl px-4 py-2 text-[#3D3732] outline-none focus:border-[#A1C181] ${
+                          userFormError ? 'border-danger' : 'border-[#E6E0D4]'
+                        }`}
+                        autoFocus
+                      />
+                      {userFormError && (
+                        <span role="alert" className="text-xs font-medium text-danger">
+                          {userFormError}
+                        </span>
+                      )}
+                      {/* A photo still wins when there is one - this only
+                          replaces the letter for residents without one. */}
+                      <div className="flex flex-wrap gap-1.5">
+                        {USER_ICON_IDS.map(iconId => {
+                          const Glyph = USER_ICONS[iconId];
+                          const active = userIconId({ id: u.id, icon: editUserIcon ?? u.icon }) === iconId;
+                          return (
+                            <button
+                              key={iconId}
+                              type="button"
+                              onClick={() => setEditUserIcon(iconId)}
+                              aria-pressed={active}
+                              aria-label={`אייקון ${iconId}`}
+                              className={`w-8 h-8 rounded-full flex items-center justify-center border transition-colors ${
+                                active
+                                  ? 'bg-[#A1C181] text-white border-[#A1C181]'
+                                  : 'bg-white text-[#8C7E6A] border-[#E6E0D4] hover:bg-[#F3EFE9]'
+                              }`}
+                            >
+                              <Glyph className="w-4 h-4" />
+                            </button>
+                          );
+                        })}
+                      </div>
+                      {u.photoURL && (
+                        <span className="text-[10px] text-[#A39788]">
+                          לדייר יש תמונה, והיא זו שתוצג. האייקון מחליף את האות כשאין תמונה.
+                        </span>
+                      )}
+                    </div>
                     <button onClick={handleSaveUserEdit} className="p-2 bg-[#A1C181] text-white rounded-xl">
                       <Check className="w-5 h-5" />
                     </button>
@@ -3319,6 +3669,12 @@ export default function ChoresApp() {
               // Read the absence window rather than the stored mirror, so a
               // window that has already ended stops greying the resident out.
               const absentNow = isUserAbsentNow(u, today);
+              const isHomeOwner = household?.ownerId === u.id;
+              const isCoManager = managerIds.includes(u.id);
+              // Only an account can hold the role: a local profile is a face on
+              // a shared phone, not something the security rules can check.
+              const canPromote =
+                isOwner && !isHomeOwner && (u.linkedAuth || household?.members.includes(u.id));
               return (
                 <div key={u.id} className="flex items-center justify-between p-4">
                   <div className="flex items-center gap-3">
@@ -3337,6 +3693,8 @@ export default function ChoresApp() {
                           name={u.name}
                           color={u.color}
                           photoURL={resolvePhoto(u)}
+                          icon={u.icon}
+                          iconSeed={u.id}
                           size="md"
                           className={absentNow ? 'opacity-40 grayscale' : ''}
                         />
@@ -3353,6 +3711,8 @@ export default function ChoresApp() {
                         name={u.name}
                         color={u.color}
                         photoURL={resolvePhoto(u)}
+                        icon={u.icon}
+                        iconSeed={u.id}
                         size="md"
                         className={absentNow ? 'opacity-40 grayscale' : ''}
                       />
@@ -3363,7 +3723,7 @@ export default function ChoresApp() {
                       </span>
                       <p className="text-[10px] text-[#A39788]">
                         {u.linkedAuth || u.id === user?.uid ? 'חשבון גוגל' : 'דייר מקומי'}
-                        {household?.ownerId === u.id ? ' · מנהל' : ''}
+                        {isHomeOwner ? ' · בעל/ת הבית' : isCoManager ? ' · מנהל/ת' : ''}
                       </p>
                     </div>
                   </div>
@@ -3382,85 +3742,133 @@ export default function ChoresApp() {
                         {absentNow ? 'לא כאן' : 'נוכח'}
                       </button>
                     )}
-                    {!u.linkedAuth && u.id !== user?.uid && (
+                    {/* Hidden rather than ghosted. A member's settings screen
+                        should be a settings screen, not a manager's with the
+                        lights off - and on a phone a disabled control has no
+                        way at all to say why it is disabled. */}
+                    {canPromote && (
+                      <button
+                        type="button"
+                        onClick={() => toggleManager(u.id, !isCoManager)}
+                        disabled={homeActionBusy}
+                        title={isCoManager ? 'בטל הרשאת ניהול' : 'מנה כמנהל/ת'}
+                        aria-label={isCoManager ? 'בטל הרשאת ניהול' : 'מנה כמנהל/ת'}
+                        className={`flex items-center gap-1.5 px-3 py-2 rounded-2xl text-xs font-medium transition-colors border disabled:opacity-40 ${
+                          isCoManager
+                            ? 'bg-[#3D5A80]/10 text-[#3D5A80] border-[#3D5A80]/30 hover:bg-[#3D5A80]/20'
+                            : 'bg-[#F3EFE9] text-[#8C7E6A] border-[#E6E0D4] hover:bg-[#EAE3D5]'
+                        }`}
+                      >
+                        <Shield className="w-4 h-4" />
+                        {isCoManager ? 'מנהל/ת' : 'מנה כמנהל/ת'}
+                      </button>
+                    )}
+                    {isAdmin && !u.linkedAuth && u.id !== user?.uid && (
                       <>
-                        <AdminHint allowed={isAdmin}>
-                          <button
-                            onClick={() => { if (!isAdmin) return; setEditingUserId(u.id); setEditUserName(u.name); }}
-                            disabled={!isAdmin}
-                            title={isAdmin ? 'ערוך דייר' : adminOnlyTitle}
-                            aria-label={isAdmin ? 'ערוך דייר' : adminOnlyTitle}
-                            className={`p-2 text-[#8C7E6A] hover:bg-[#F3EFE9] rounded-xl transition-colors ${adminDisabledClass}`}
-                          >
-                            <Pencil className="w-4 h-4" />
-                          </button>
-                        </AdminHint>
-                        <AdminHint allowed={isAdmin}>
-                          <button
-                            onClick={() => handleDeleteUser(u.id)}
-                            disabled={!isAdmin}
-                            title={isAdmin ? 'מחק דייר' : adminOnlyTitle}
-                            aria-label={isAdmin ? 'מחק דייר' : adminOnlyTitle}
-                            className={`p-2 text-rose-400 hover:bg-rose-50 rounded-xl transition-colors ${adminDisabledClass}`}
-                          >
-                            <Trash2 className="w-4 h-4" />
-                          </button>
-                        </AdminHint>
+                        <button
+                          onClick={() => {
+                            setEditingUserId(u.id);
+                            setEditUserName(u.name);
+                            setEditUserIcon(isUserIconId(u.icon) ? u.icon : null);
+                            setUserFormError(null);
+                          }}
+                          title="ערוך דייר"
+                          aria-label="ערוך דייר"
+                          className="p-2 text-[#8C7E6A] hover:bg-[#F3EFE9] rounded-xl transition-colors"
+                        >
+                          <Pencil className="w-4 h-4" />
+                        </button>
+                        <button
+                          onClick={() => handleDeleteUser(u.id)}
+                          title="מחק דייר"
+                          aria-label="מחק דייר"
+                          className="p-2 text-rose-400 hover:bg-rose-50 rounded-xl transition-colors"
+                        >
+                          <Trash2 className="w-4 h-4" />
+                        </button>
                       </>
                     )}
-                    {u.id !== user?.uid &&
+                    {/* Who may reach the household at all is the owner's. */}
+                    {isOwner &&
+                      u.id !== user?.uid &&
                       (u.linkedAuth || household?.members.includes(u.id)) && (
-                      <AdminHint allowed={isAdmin}>
                         <button
                           type="button"
                           onClick={() => handleDisconnectMember(u.id)}
-                          disabled={!isAdmin}
-                          title={isAdmin ? 'נתק מהבית' : adminOnlyTitle}
-                          aria-label={isAdmin ? 'נתק מהבית' : adminOnlyTitle}
-                          className={`flex items-center gap-1.5 px-3 py-2 text-xs font-medium text-rose-500 hover:bg-rose-50 rounded-2xl transition-colors border border-rose-100 ${adminDisabledClass}`}
+                          title="נתק מהבית"
+                          aria-label="נתק מהבית"
+                          className="flex items-center gap-1.5 px-3 py-2 text-xs font-medium text-rose-500 hover:bg-rose-50 rounded-2xl transition-colors border border-rose-100"
                         >
                           <UserMinus className="w-4 h-4" />
                           נתק
                         </button>
-                      </AdminHint>
-                    )}
+                      )}
                   </div>
                 </div>
               );
             })}
             
             {isAddingUser && isAdmin ? (
-              <div className="p-4 flex items-center gap-3 bg-[#FAF9F6]">
-                <input
-                  type="text"
-                  value={newUserName}
-                  onChange={(e) => setNewUserName(e.target.value)}
-                  maxLength={100}
-                  placeholder="שם הדייר החדש"
-                  className="flex-1 bg-white border border-[#E6E0D4] rounded-xl px-4 py-2 text-[#3D3732] outline-none focus:border-[#A1C181]"
-                  autoFocus
-                />
-                <button onClick={handleSaveNewUser} className="p-2 bg-[#A1C181] text-white rounded-xl">
+              <div className="p-4 flex items-start gap-3 bg-[#FAF9F6]">
+                <div className="flex-1 flex flex-col gap-1">
+                  <input
+                    ref={newUserNameRef}
+                    type="text"
+                    value={newUserName}
+                    onChange={(e) => {
+                      setNewUserName(e.target.value);
+                      if (userFormError) setUserFormError(null);
+                    }}
+                    onKeyDown={(e) => {
+                      if (e.key === 'Enter') handleSaveNewUser();
+                    }}
+                    maxLength={100}
+                    placeholder="שם הדייר החדש"
+                    aria-label="שם הדייר החדש"
+                    aria-invalid={!!userFormError}
+                    className={`w-full bg-white border rounded-xl px-4 py-2 text-[#3D3732] outline-none focus:border-[#A1C181] ${
+                      userFormError ? 'border-danger' : 'border-[#E6E0D4]'
+                    }`}
+                    autoFocus
+                  />
+                  {userFormError && (
+                    <span role="alert" className="text-xs font-medium text-danger">
+                      {userFormError}
+                    </span>
+                  )}
+                </div>
+                <button
+                  onClick={handleSaveNewUser}
+                  aria-label="שמור דייר"
+                  className="p-2 bg-[#A1C181] text-white rounded-xl"
+                >
                   <Check className="w-5 h-5" />
                 </button>
-                <button onClick={() => setIsAddingUser(false)} className="p-2 bg-[#F3EFE9] text-[#8C7E6A] rounded-xl">
+                <button
+                  onClick={() => {
+                    setIsAddingUser(false);
+                    setUserFormError(null);
+                  }}
+                  aria-label="בטל הוספת דייר"
+                  className="p-2 bg-[#F3EFE9] text-[#8C7E6A] rounded-xl"
+                >
                   <UserX className="w-5 h-5" />
                 </button>
               </div>
-            ) : (
-              <AdminHint allowed={isAdmin} className="block w-full">
-                <button 
-                  onClick={() => { if (!isAdmin) return; setIsAddingUser(true); }}
-                  disabled={!isAdmin || users.length >= MEMBER_SOFT_LIMIT}
-                  title={!isAdmin ? adminOnlyTitle : undefined}
-                  aria-label={!isAdmin ? adminOnlyTitle : 'הוסף דייר מקומי'}
-                  className={`w-full p-4 flex items-center justify-center gap-2 text-[#8C7E6A] hover:bg-[#F3EFE9] transition-colors disabled:hover:bg-transparent ${adminDisabledClass}`}
-                >
-                  <Plus className="w-4 h-4" />
-                  <span className="font-medium text-sm">הוסף דייר מקומי</span>
-                </button>
-              </AdminHint>
-            )}
+            ) : isAdmin ? (
+              <button
+                onClick={() => {
+                  setUserFormError(null);
+                  setIsAddingUser(true);
+                }}
+                disabled={users.length >= MEMBER_SOFT_LIMIT}
+                aria-label="הוסף דייר מקומי"
+                className="w-full p-4 flex items-center justify-center gap-2 text-[#8C7E6A] hover:bg-[#F3EFE9] transition-colors disabled:opacity-40 disabled:hover:bg-transparent"
+              >
+                <Plus className="w-4 h-4" />
+                <span className="font-medium text-sm">הוסף דייר מקומי</span>
+              </button>
+            ) : null}
           </div>
         </CollapsibleSection>
 
@@ -3475,7 +3883,14 @@ export default function ChoresApp() {
                     <span className="w-6 text-center font-extrabold text-[#A39788]">
                       {idx === 0 ? '🥇' : idx === 1 ? '🥈' : idx === 2 ? '🥉' : idx + 1}
                     </span>
-                    <Avatar name={u.name} color={u.color} photoURL={resolvePhoto(u)} size="sm" />
+                    <Avatar
+                      name={u.name}
+                      color={u.color}
+                      photoURL={resolvePhoto(u)}
+                      icon={u.icon}
+                      iconSeed={u.id}
+                      size="sm"
+                    />
                     <span className="font-medium text-[#4A443F]">{u.id === currentUserId ? 'אני' : u.name}</span>
                   </div>
                   <span className="text-sm font-bold text-[#6B5E4C]">{count} משימות</span>
@@ -3488,18 +3903,26 @@ export default function ChoresApp() {
         {/* Task Management — visible to all, write actions owner-only */}
         <CollapsibleSection title="ניהול משימות" Icon={ListTodo} hint={`${recurringChores.length}`}>
           {!isAdmin && (
-            <p className="text-xs text-[#8C7E6A] -mt-1">רק מנהל הבית יכול להוסיף או לערוך משימות</p>
+            <p className="text-xs text-[#8C7E6A] -mt-1">רק מנהל/ת הבית יכול/ה להוסיף או לערוך משימות</p>
           )}
           <div className="flex flex-col gap-3">
             {recurringChores.map(chore => {
               const health = getChoreHealth(chore, today);
               const isEditingThis = editingChoreId === chore.id;
+              const ChoreGlyph = CHORE_ICONS[choreIconId(chore)];
               return (
               <div key={chore.id} className="flex flex-col gap-2">
-              <div className={`bg-white p-4 rounded-2xl border shadow-sm flex items-center justify-between transition-colors ${
+              <div className={`bg-white p-4 rounded-2xl border shadow-sm flex items-center justify-between gap-3 transition-colors ${
                 isEditingThis ? 'border-[#A1C181] ring-1 ring-[#A1C181]/40' : 'border-[#E6E0D4]'
               }`}>
-                <div>
+                <div className="flex items-start gap-3 min-w-0">
+                  <span
+                    aria-hidden="true"
+                    className="w-9 h-9 rounded-2xl bg-[#F1ECE3] text-[#6B5E4C] flex items-center justify-center flex-shrink-0"
+                  >
+                    <ChoreGlyph className="w-4 h-4" />
+                  </span>
+                <div className="min-w-0">
                   <h4 className="font-bold text-[#3D3732]">{chore.name}</h4>
                   <div className="flex gap-2 mt-1 flex-wrap">
                     <span className="text-xs px-2 py-0.5 bg-[#F5F1EA] text-[#A39788] rounded">
@@ -3528,35 +3951,29 @@ export default function ChoresApp() {
                       : `בוצעה לפני ${health.daysSince} ימים${health.overdueBy && health.overdueBy > 0 ? ` · ${health.overdueBy} ימים באיחור` : ''}`}
                   </p>
                 </div>
-                <div className="flex gap-1">
-                  <AdminHint allowed={isAdmin}>
-                    <button 
-                      onClick={() => {
-                        if (!isAdmin) return;
-                        isEditingThis ? cancelChoreForm() : handleEditChore(chore);
-                      }}
-                      disabled={!isAdmin}
-                      title={isAdmin ? (isEditingThis ? 'סגור עריכה' : 'ערוך משימה') : adminOnlyTitle}
-                      aria-label={isAdmin ? (isEditingThis ? 'סגור עריכה' : 'ערוך משימה') : adminOnlyTitle}
-                      className={`p-2 rounded-xl transition-colors ${adminDisabledClass} ${
+                </div>
+                {isAdmin && (
+                  <div className="flex gap-1 flex-shrink-0">
+                    <button
+                      onClick={() => (isEditingThis ? cancelChoreForm() : handleEditChore(chore))}
+                      title={isEditingThis ? 'סגור עריכה' : 'ערוך משימה'}
+                      aria-label={isEditingThis ? 'סגור עריכה' : 'ערוך משימה'}
+                      className={`p-2 rounded-xl transition-colors ${
                         isEditingThis ? 'text-[#6B5E4C] bg-[#A1C181]/15' : 'text-[#8C7E6A] hover:bg-[#F3EFE9]'
                       }`}
                     >
                       {isEditingThis ? <X className="w-5 h-5" /> : <Pencil className="w-5 h-5" />}
                     </button>
-                  </AdminHint>
-                  <AdminHint allowed={isAdmin}>
-                    <button 
+                    <button
                       onClick={() => handleDeleteChore(chore.id)}
-                      disabled={!isAdmin}
-                      title={isAdmin ? 'מחק משימה' : adminOnlyTitle}
-                      aria-label={isAdmin ? 'מחק משימה' : adminOnlyTitle}
-                      className={`p-2 text-rose-400 hover:bg-rose-50 rounded-xl transition-colors ${adminDisabledClass}`}
+                      title="מחק משימה"
+                      aria-label="מחק משימה"
+                      className="p-2 text-rose-400 hover:bg-rose-50 rounded-xl transition-colors"
                     >
                       <Trash2 className="w-5 h-5" />
                     </button>
-                  </AdminHint>
-                </div>
+                  </div>
+                )}
               </div>
               {isEditingThis && isAdmin && renderChoreForm(chore)}
               </div>
@@ -3565,19 +3982,18 @@ export default function ChoresApp() {
 
             {isAddingChore && isAdmin && !editingChoreId ? (
               renderChoreForm()
-            ) : !isAddingChore ? (
-              <AdminHint allowed={isAdmin} className="block">
-                <button 
-                  onClick={() => { if (!isAdmin) return; setIsAddingChore(true); }}
-                  disabled={!isAdmin}
-                  title={!isAdmin ? adminOnlyTitle : undefined}
-                  aria-label={!isAdmin ? adminOnlyTitle : 'הוספת משימה חדשה'}
-                  className={`w-full bg-[#F3EFE9] p-4 rounded-3xl border border-dashed border-[#DED8CE] flex flex-col items-center justify-center mt-2 hover:bg-[#EAE3D5] transition-colors gap-2 ${adminDisabledClass}`}
-                >
-                  <Plus className="w-6 h-6 text-[#8C7E6A]" />
-                  <span className="font-medium text-[#8C7E6A]">הוספת משימה חדשה</span>
-                </button>
-              </AdminHint>
+            ) : !isAddingChore && isAdmin ? (
+              <button
+                onClick={() => {
+                  setChoreFormError(null);
+                  setIsAddingChore(true);
+                }}
+                aria-label="הוספת משימה חדשה"
+                className="w-full bg-[#F3EFE9] p-4 rounded-3xl border border-dashed border-[#DED8CE] flex flex-col items-center justify-center mt-2 hover:bg-[#EAE3D5] transition-colors gap-2"
+              >
+                <Plus className="w-6 h-6 text-[#8C7E6A]" />
+                <span className="font-medium text-[#8C7E6A]">הוספת משימה חדשה</span>
+              </button>
             ) : null}
           </div>
         </CollapsibleSection>

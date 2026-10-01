@@ -31,6 +31,10 @@ const HOUSEHOLD = 'h1';
 const OWNER = 'owner-uid';
 const MEMBER = 'member-uid';
 const OUTSIDER = 'outsider-uid';
+// Only the storage stub needs this as a separate account. The Firestore cases
+// promote MEMBER instead, so the seeded household keeps the shape it had
+// before co-managers existed and every other case still exercises it.
+const MANAGER = 'manager-uid';
 const CHORE = 'chore1';
 const LOG = 'log1';
 const RESIDENT = 'resident1';
@@ -96,8 +100,8 @@ function stubCrossServiceLookups(source: string) {
       `function isMember(householdId) {\n      return isSignedIn() && householdId == '${HOUSEHOLD}';\n    }`
     )
     .replace(
-      /function isOwnerOfHousehold\(householdId\) \{[\s\S]*?\n {4}\}/,
-      `function isOwnerOfHousehold(householdId) {\n      return isSignedIn() && request.auth.uid == '${OWNER}';\n    }`
+      /function isManagerOfHousehold\(householdId\) \{[\s\S]*?\n {4}\}/,
+      `function isManagerOfHousehold(householdId) {\n      return isSignedIn() && (request.auth.uid == '${OWNER}' || request.auth.uid == '${MANAGER}');\n    }`
     );
   if (replaced.includes('firestore.get')) {
     throw new Error('storage.rules changed shape: the membership helpers were not stubbed');
@@ -159,10 +163,28 @@ async function main() {
   const member = () => fs(testEnv.authenticatedContext(MEMBER));
   const outsider = () => fs(testEnv.authenticatedContext(OUTSIDER));
 
+  // The seeded household has no managerIds at all, which is the shape every
+  // household written before co-managers has. Cases that need one say so.
+  const promote = async (...uids: string[]) => {
+    await testEnv.withSecurityRulesDisabled(async (context) => {
+      await updateDoc(doc(fs(context), 'households', HOUSEHOLD), { managerIds: uids });
+    });
+  };
+
   console.log('\nmembership');
 
   await test('a member lists the chores', async () => {
     await assertSucceeds(getDocs(collection(member(), path('chores'))));
+  });
+
+  await test('residents of a home the server does not have yet are denied, not an evaluation error', async () => {
+    const read = getDocs(collection(owner(), 'households', 'not-created-yet', 'users'));
+    await assertFails(read);
+    await read.catch((error: { message?: string }) => {
+      if (String(error.message).includes('Null value')) {
+        throw new Error(`missing household still throws instead of denying: ${error.message}`);
+      }
+    });
   });
 
   await test('an outsider cannot list the chores', async () => {
@@ -359,6 +381,90 @@ async function main() {
     await assertSucceeds(updateDoc(doc(owner(), 'households', HOUSEHOLD), { name: 'בית חדש' }));
   });
 
+  console.log('\nco-managers');
+
+  await test('a household saved before co-managers existed still answers for its owner', async () => {
+    // The seed has no managerIds field, and reading a missing key is an error
+    // rather than an empty list, so this is the case that breaks first.
+    await assertSucceeds(setDoc(doc(owner(), path('chores', 'chore2')), chore()));
+    await assertFails(setDoc(doc(member(), path('chores', 'chore6')), chore()));
+  });
+
+  await test('a co-manager runs the everyday admin: chores, residents, history', async () => {
+    await promote(MEMBER);
+    await assertSucceeds(setDoc(doc(member(), path('chores', 'chore2')), chore()));
+    await assertSucceeds(updateDoc(doc(member(), path('chores', CHORE)), { rotation: ['resident2', RESIDENT] }));
+    await assertSucceeds(deleteDoc(doc(member(), path('chores', CHORE))));
+    await assertSucceeds(setDoc(doc(member(), path('users', 'resident2')), resident({ name: 'נועה' })));
+    await assertSucceeds(updateDoc(doc(member(), path('users', RESIDENT)), resident({ isAbsent: true })));
+    await assertSucceeds(deleteDoc(doc(member(), path('logs', LOG))));
+  });
+
+  await test('a co-manager cannot rename the household', async () => {
+    await promote(MEMBER);
+    await assertFails(updateDoc(doc(member(), 'households', HOUSEHOLD), { name: 'בית חדש' }));
+  });
+
+  await test('only the owner hands out the role, or a co-manager would have no ceiling', async () => {
+    await promote(MEMBER);
+    await assertFails(updateDoc(doc(member(), 'households', HOUSEHOLD), { managerIds: [MEMBER, OWNER] }));
+    await assertSucceeds(updateDoc(doc(owner(), 'households', HOUSEHOLD), { managerIds: [] }));
+  });
+
+  await test('the owner promotes a member of a household that has never had managers', async () => {
+    await assertSucceeds(updateDoc(doc(owner(), 'households', HOUSEHOLD), { managerIds: [MEMBER] }));
+  });
+
+  await test('somebody who is not in the household cannot be promoted', async () => {
+    await assertFails(updateDoc(doc(owner(), 'households', HOUSEHOLD), { managerIds: [OUTSIDER] }));
+  });
+
+  await test('a disconnected member loses the role before managerIds catches up', async () => {
+    // Removing the member and pruning managerIds are two writes. In between,
+    // the stale entry must already count for nothing.
+    await promote(MEMBER);
+    await assertSucceeds(updateDoc(doc(owner(), 'households', HOUSEHOLD), { members: [OWNER] }));
+    await assertFails(setDoc(doc(member(), path('chores', 'chore2')), chore()));
+  });
+
+  await test('a co-manager finishes the first run, a plain member does not', async () => {
+    await assertFails(updateDoc(doc(member(), 'households', HOUSEHOLD), { setupComplete: true }));
+    await promote(MEMBER);
+    await assertSucceeds(updateDoc(doc(member(), 'households', HOUSEHOLD), { setupComplete: true }));
+  });
+
+  await test('the setup flag is a flag', async () => {
+    await assertFails(updateDoc(doc(owner(), 'households', HOUSEHOLD), { setupComplete: 'yes' }));
+  });
+
+  await test('a new household may declare itself unset-up', async () => {
+    await assertSucceeds(
+      setDoc(doc(owner(), 'households', 'h2'), {
+        ownerId: OWNER,
+        members: [OWNER],
+        name: 'בית חדש',
+        setupComplete: false
+      })
+    );
+  });
+
+  console.log('\nicons');
+
+  await test('a chore may name the icon it is drawn with', async () => {
+    await assertSucceeds(setDoc(doc(owner(), path('chores', 'chore2')), chore({ icon: 'dishes' })));
+  });
+
+  await test('an icon is a short name, never an image', async () => {
+    await assertFails(setDoc(doc(owner(), path('chores', 'chore2')), chore({ icon: 'x'.repeat(25) })));
+    await assertFails(setDoc(doc(owner(), path('chores', 'chore3')), chore({ icon: 7 })));
+  });
+
+  await test('a resident may carry an icon, and may set their own', async () => {
+    await assertSucceeds(setDoc(doc(owner(), path('users', 'resident2')), resident({ icon: 'rocket' })));
+    await assertSucceeds(updateDoc(doc(member(), path('users', MEMBER)), { icon: 'star' }));
+    await assertFails(updateDoc(doc(member(), path('users', MEMBER)), { icon: 'x'.repeat(25) }));
+  });
+
   console.log('\nresident profiles');
 
   await test('the owner adds a resident', async () => {
@@ -438,6 +544,11 @@ async function main() {
 
   await test('the owner sets an avatar for a local resident', async () => {
     const context = testEnv.authenticatedContext(OWNER);
+    await assertSucceeds(uploadBytes(avatar(context, RESIDENT), jpeg, asJpeg));
+  });
+
+  await test('a co-manager sets an avatar for a local resident, who cannot do it themselves', async () => {
+    const context = testEnv.authenticatedContext(MANAGER);
     await assertSucceeds(uploadBytes(avatar(context, RESIDENT), jpeg, asJpeg));
   });
 

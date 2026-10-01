@@ -22,35 +22,24 @@ import {
   activeHouseholdStorageKey,
   generateHouseholdId,
   HouseholdDoc,
+  isHouseholdOwner,
   mergeAuthPhoto,
-  pickActiveHouseholdId
+  pickActiveHouseholdId,
+  profileColor
 } from './household-utils';
-
-const PROFILE_COLORS = [
-  'bg-[#A1C181]',
-  'bg-[#D4CBBF]',
-  'bg-[#8C7E6A]',
-  'bg-[#B99543]',
-  'bg-[#E5989B]',
-  'bg-[#81B29A]',
-  'bg-[#E07A5F]',
-  'bg-[#3D5A80]'
-];
+import { fallbackUserIcon } from './default-icons';
 
 export function profileFromAuth(user: FirebaseUser) {
   return {
     name: user.displayName?.trim() || user.email?.split('@')[0] || 'משתמש',
-    color: PROFILE_COLORS[Math.abs(hashString(user.uid)) % PROFILE_COLORS.length],
+    color: profileColor(user.uid),
     isAbsent: false,
     linkedAuth: true,
+    // A face for the account that has no Google picture, and a face this
+    // profile keeps if the picture is ever removed.
+    icon: fallbackUserIcon(user.uid),
     ...(user.photoURL ? { photoURL: user.photoURL } : {})
   };
-}
-
-function hashString(s: string) {
-  let h = 0;
-  for (let i = 0; i < s.length; i++) h = (h * 31 + s.charCodeAt(i)) | 0;
-  return h;
 }
 
 export async function ensureLoginProfile(householdId: string, user: FirebaseUser) {
@@ -66,6 +55,7 @@ export async function ensureLoginProfile(householdId: string, user: FirebaseUser
     isAbsent?: boolean;
     linkedAuth?: boolean;
     photoURL?: string;
+    icon?: string;
   };
   const patch: Record<string, string | boolean> = {};
   if (data.linkedAuth !== true) patch.linkedAuth = true;
@@ -74,7 +64,7 @@ export async function ensureLoginProfile(householdId: string, user: FirebaseUser
     patch.name = user.displayName?.trim() || user.email?.split('@')[0] || 'משתמש';
   }
   if (!data.color || typeof data.color !== 'string') {
-    patch.color = PROFILE_COLORS[Math.abs(hashString(user.uid)) % PROFILE_COLORS.length];
+    patch.color = profileColor(user.uid);
   }
   const photoPatch = mergeAuthPhoto(data, user.photoURL);
   if (photoPatch?.photoURL) patch.photoURL = photoPatch.photoURL;
@@ -155,14 +145,27 @@ export function useHousehold(user: FirebaseUser | null | undefined) {
     const q = query(collection(db, 'households'), where('members', 'array-contains', userId));
     const unsubscribe = onSnapshot(
       q,
+      // Metadata too, because a server acknowledgement of an unchanged local
+      // write does not fire a second snapshot otherwise.
+      { includeMetadataChanges: true },
       (snapshot) => {
+        // A household you just created shows up here before the server has
+        // it. Listening to its residents in that window makes the rules
+        // lookup miss, and that listener does not retry once it is denied.
+        if (snapshot.metadata.hasPendingWrites) return;
         const list: HouseholdDoc[] = snapshot.docs.map((d) => {
           const data = d.data();
           return {
             id: d.id,
             ownerId: data.ownerId as string,
             members: (data.members as string[]) || [],
-            ...(typeof data.name === 'string' ? { name: data.name } : {})
+            ...(typeof data.name === 'string' ? { name: data.name } : {}),
+            ...(Array.isArray(data.managerIds) ? { managerIds: data.managerIds as string[] } : {}),
+            // Left off rather than defaulted: a household with no such field
+            // predates the setup wizard and must not be sent through it.
+            ...(typeof data.setupComplete === 'boolean'
+              ? { setupComplete: data.setupComplete }
+              : {})
           };
         });
         list.sort((a, b) => a.id.localeCompare(b.id));
@@ -201,9 +204,17 @@ export function useHousehold(user: FirebaseUser | null | undefined) {
       if (!user) return;
       const newId = generateHouseholdId();
       const trimmed = name?.trim();
-      const payload: { ownerId: string; members: string[]; name?: string } = {
+      const payload: {
+        ownerId: string;
+        members: string[];
+        name?: string;
+        setupComplete: boolean;
+      } = {
         ownerId: user.uid,
-        members: [user.uid]
+        members: [user.uid],
+        // Written false rather than left out, so the first run can tell a
+        // brand-new household from one created before the wizard existed.
+        setupComplete: false
       };
       if (trimmed) payload.name = trimmed.slice(0, 80);
 
@@ -230,6 +241,27 @@ export function useHousehold(user: FirebaseUser | null | undefined) {
       console.error('Rename household error:', error);
       throw error;
     }
+  };
+
+  /**
+   * Hand the day-to-day admin to another account, or take it back. The owner's
+   * alone: a co-manager who could promote could also promote themselves past
+   * the limits the role still has.
+   */
+  const setHouseholdManagers = async (id: string, managerIds: string[]) => {
+    if (!user) return;
+    const h = households.find((x) => x.id === id);
+    if (!h || !isHouseholdOwner(h, user.uid)) throw new Error('not_owner');
+    // Only members can be managers, and the owner already outranks the list.
+    const next = [...new Set(managerIds)].filter(
+      (uid) => uid !== h.ownerId && h.members.includes(uid)
+    );
+    await updateDoc(doc(db, 'households', id), { managerIds: next });
+  };
+
+  /** Leave the first-run wizard behind, whether it was finished or skipped. */
+  const markSetupComplete = async (id: string) => {
+    await updateDoc(doc(db, 'households', id), { setupComplete: true });
   };
 
   const joinHousehold = async (id: string) => {
@@ -266,6 +298,8 @@ export function useHousehold(user: FirebaseUser | null | undefined) {
     selectHousehold,
     createHousehold,
     renameHousehold,
-    joinHousehold
+    joinHousehold,
+    setHouseholdManagers,
+    markSetupComplete
   };
 }
